@@ -4,14 +4,13 @@ export default class HUDScene extends Phaser.Scene {
   playerHPBars: Phaser.GameObjects.Graphics[] = [];
   playerCEBars: Phaser.GameObjects.Graphics[] = [];
   playerNames: Phaser.GameObjects.Text[] = [];
+  abilityIcons: Map<string, any> = new Map();
 
   constructor() {
     super('HUDScene');
   }
 
   create(data: any) {
-    const { players } = data;
-    
     // Cleanup old elements
     this.playerHPBars = [];
     this.playerCEBars = [];
@@ -21,16 +20,16 @@ export default class HUDScene extends Phaser.Scene {
     const mainScene = this.scene.get('MainScene');
     mainScene.events.on('updateHUD', (stats: any) => {
       this.drawPlayersHUD(stats.players);
+      const p1 = stats.players.find((p: any) => p.id === 'p1');
+      if (p1) this.drawAbilityBar(p1);
     });
   }
 
   drawPlayersHUD(players: any[]) {
-    // Clear graphics if they exist
     this.playerHPBars.forEach(b => b.clear());
     this.playerCEBars.forEach(b => b.clear());
 
     players.forEach((p, i) => {
-      // Create if doesn't exist
       if (!this.playerHPBars[i]) {
         this.playerHPBars[i] = this.add.graphics();
         this.playerCEBars[i] = this.add.graphics();
@@ -52,29 +51,158 @@ export default class HUDScene extends Phaser.Scene {
       const y = 60;
       const color = p.color ? parseInt(p.color.replace('#', ''), 16) : 0x4a9eff;
 
-      // Draw Bars
       this.drawFramedBar(this.playerHPBars[i], x, y, 200, 12, p.hp * 2, color);
       this.drawFramedBar(this.playerCEBars[i], x, y + 18, 180, 6, p.ce * 1.8, 0x7ab8ff, 0.2);
     });
   }
 
+  drawAbilityBar(player: any) {
+    const { width, height } = this.scale;
+    const centerY = height - 80;
+    const slotW = 60;
+    const spacing = 75;
+    
+    // Horizontal start
+    const allAbilities = [
+        { slot: 'Light', key: 'J', name: 'Light', cooldownFraction: 1, remainingCooldown: 0 },
+        { slot: 'Heavy', key: 'K', name: 'Heavy', cooldownFraction: 1, remainingCooldown: 0 },
+        ...player.abilities,
+        { slot: 'Domain', key: 'Q', name: 'Domain', cooldownFraction: player.canExpandDomain ? 1 : 0, remainingCooldown: 0 }
+    ];
+
+    const totalWidth = allAbilities.length * spacing;
+    const startX = (width - totalWidth) / 2 + spacing / 2;
+
+    allAbilities.forEach((ability: any, i: number) => {
+        const x = startX + i * spacing;
+        let elements = this.abilityIcons.get(ability.slot);
+        
+        if (!elements) {
+            const container = this.add.container(x, centerY);
+            
+            // BG Glass
+            const bg = this.add.rectangle(0, 0, slotW, slotW, 0x000000, 0.4)
+                .setStrokeStyle(2, 0xffffff, 0.1)
+                .setDepth(10);
+            
+            // Fill Cooldown
+            const fill = this.add.rectangle(0, slotW / 2, slotW, 0, 0xffffff, 0.15)
+                .setOrigin(0.5, 1)
+                .setDepth(11);
+            
+            // Key Highlight
+            const keyBg = this.add.rectangle(0, -slotW/2 - 10, 24, 18, 0x000000, 0.8)
+                .setStrokeStyle(1, 0xffcc00, 0.5)
+                .setDepth(15);
+            const keyTxt = this.add.text(0, -slotW/2 - 10, ability.key, { fontSize: '12px', color: '#ffcc00', fontFamily: 'Share Tech Mono' })
+                .setOrigin(0.5).setDepth(16);
+
+            const nameTxt = this.add.text(0, slotW/2 + 10, ability.name.toUpperCase(), { fontSize: '9px', color: '#888888', letterSpacing: 1, fontFamily: 'Share Tech Mono' })
+                .setOrigin(0.5).setDepth(15);
+
+            const cdTxt = this.add.text(0, 0, '', { fontSize: '22px', color: '#ffffff', fontStyle: 'bold', fontFamily: 'Share Tech Mono' })
+                .setOrigin(0.5).setDepth(20);
+
+            container.add([bg, fill, keyBg, keyTxt, nameTxt, cdTxt]);
+            elements = { container, fill, cdTxt, bg };
+            this.abilityIcons.set(ability.slot, elements);
+        }
+
+        // Update Cooldown Visuals
+        const isDomainSlot = ability.slot === 'Domain' && !player.canExpandDomain;
+        const isCooldown = ability.remainingCooldown > 0 || isDomainSlot;
+        
+        elements.fill.height = isCooldown ? slotW * (1 - ability.cooldownFraction) : 0;
+        elements.container.alpha = isCooldown ? 0.6 : 1;
+        
+        if (ability.remainingCooldown > 0) {
+            elements.cdTxt.setText(Math.ceil(ability.remainingCooldown / 1000).toString());
+        } else if (ability.slot === 'Domain' && !player.canExpandDomain) {
+            elements.cdTxt.setText('🔒');
+        } else {
+            elements.cdTxt.setText('');
+        }
+
+        // Border Pulse when ready
+        if (ability.remainingCooldown <= 0 && !isDomainSlot) {
+            elements.bg.setStrokeStyle(2, 0x10b981, 0.5);
+        } else {
+            elements.bg.setStrokeStyle(2, 0xffffff, 0.1);
+        }
+    });
+  }
+
   drawFramedBar(g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number, fillW: number, color: number, bgAlpha = 0.2) {
-    // Background
     g.fillStyle(0x000000, 0.5);
     g.fillRect(x, y, w, h);
-    
-    // Fill
     g.fillStyle(color, 1);
     g.fillRect(x, y, fillW, h);
-
-    // Frame
     g.lineStyle(1, color, 0.5);
     g.strokeRect(x - 2, y - 2, w + 4, h + 4);
-
-    // Scanlines
     g.lineStyle(1, 0x000000, 0.2);
     for(let i = 0; i < w; i += 4) {
       g.lineBetween(x + i, y, x + i, y + h);
     }
+  }
+
+  // Clash UI Methods
+  showClashIndicator(winnerName: string) {
+    const txt = this.add.text(this.scale.width / 2, 100, `CLASH WINNER: ${winnerName}`, {
+      fontSize: '32px',
+      color: '#ffcc00',
+      fontFamily: 'Share Tech Mono'
+    }).setOrigin(0.5);
+    
+    this.tweens.add({
+      targets: txt,
+      y: 150,
+      alpha: 0,
+      duration: 2000,
+      onComplete: () => txt.destroy()
+    });
+  }
+
+  tickStack(barId: string, color: string) {
+    this.spawnFloatingText('+STACK', color, 120, 110);
+  }
+
+  drainBar(barId: string, amount: number) {
+    const text = this.add.text(this.scale.width / 2, this.scale.height - 100, `-${amount} ${barId}`, {
+      fontFamily: 'Share Tech Mono',
+      fontSize: '20px',
+      color: '#ff0000'
+    }).setOrigin(0.5);
+    
+    this.tweens.add({
+      targets: text,
+      y: text.y - 50,
+      alpha: 0,
+      duration: 1000,
+      onComplete: () => text.destroy()
+    });
+  }
+
+  showStatusIcon(iconKey: string, duration: number) {
+    // Basic icon pop
+    const icon = this.add.text(this.scale.width - 50, 150, '⚠️', { fontSize: '32px' }).setOrigin(0.5);
+    this.time.delayedCall(duration, () => icon.destroy());
+  }
+
+  spawnFloatingText(text: string, color: string, x: number, y: number) {
+    const txt = this.add.text(x, y, text, {
+      fontFamily: 'Share Tech Mono',
+      fontSize: '24px',
+      color: color || '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 3
+    }).setOrigin(0.5);
+
+    this.tweens.add({
+      targets: txt,
+      y: txt.y - 80,
+      alpha: 0,
+      duration: 1500,
+      onComplete: () => txt.destroy()
+    });
   }
 }

@@ -15,6 +15,21 @@ export function getGradeName(grade: number): string {
   return GRADE_NAMES[Math.min(Math.max(0, Math.floor(grade)), GRADE_NAMES.length - 1)];
 }
 
+export interface AbilityConfig {
+  slot: string;
+  name: string;
+  key: string;
+  cost: {
+    cursedEnergy?: number;
+    throatStrain?: number;
+  };
+  cooldown: number; // ms
+  activeDuration?: number;
+  selfDamage?: number;
+  description?: string;
+  archetype?: string;
+}
+
 export interface CharacterData {
   name: string;
   perceived_grade: string;
@@ -31,6 +46,7 @@ export interface CharacterData {
     name: string;
     description: string;
     mechanic: string;
+    videoUrl?: string;
   };
   extensions: Array<{
     name: string;
@@ -44,6 +60,7 @@ export interface CharacterData {
     adaptability: number;
     domainRefinement: number;
   };
+  abilities?: AbilityConfig[];
   color?: string;
   archetype?: string;
 }

@@ -10,124 +10,147 @@ export class BackgroundFactory {
     this.bgGroup = scene.add.group();
   }
 
-  activate(profile: any, onComplete: () => void) {
+  activate(profile: any, x: number, y: number, onComplete?: () => void) {
     const domainProfile = profile.onDomainExpansion;
     if (!domainProfile) return;
 
-    // Fade out current background (simulated by a black fade)
-    const fadeRect = this.scene.add.rectangle(0, 0, this.scene.scale.width, this.scene.scale.height, 0x000000)
-      .setOrigin(0)
-      .setDepth(-100)
-      .setAlpha(0);
+    const { width, height } = this.scene.scale;
 
+    // 1. Create a Graphics object for the mask
+    const maskGraphics = this.scene.add.graphics().setDepth(-50); // Temporary depth
+    maskGraphics.fillStyle(0xffffff);
+    maskGraphics.fillCircle(x, y, 0);
+    const mask = maskGraphics.createGeometryMask();
+
+    // 2. Create a temporary group for the transition elements
+    const transitionGroup = this.scene.add.group();
+
+    // 3. Setup New Background (Video or Base)
+    // Always add a solid black bottom layer to prevent any transparency bleed
+    const blackBase = this.scene.add.rectangle(0, 0, width, height, 0x000000)
+      .setOrigin(0)
+      .setDepth(-6)
+      .setScrollFactor(0)
+      .setMask(mask);
+    transitionGroup.add(blackBase);
+
+    if (profile.videoUrl) {
+      const video = this.scene.add.video(-550, 50, 'domain_bg_video');
+      video.setOrigin(0);
+      video.setDepth(-5); // Forward of default BG (-10)
+      video.setDisplaySize(480, 270);
+      video.setScrollFactor(0);
+      video.setMute(true);
+      video.setMask(mask);
+
+      video.setLoop(true);
+      video.setMute(true);
+      video.setMask(mask);
+      video.play();
+      transitionGroup.add(video);
+
+      const overlay = this.scene.add.rectangle(0, 0, width, height, 0x000000, 0.4)
+        .setOrigin(0)
+        .setDepth(-4)
+        .setScrollFactor(0)
+        .setMask(mask);
+      transitionGroup.add(overlay);
+    } else {
+      const baseColor = parseInt(domainProfile.background.base.replace('#', ''), 16);
+      const base = this.scene.add.rectangle(0, 0, width, height, baseColor)
+        .setOrigin(0)
+        .setDepth(-5)
+        .setScrollFactor(0)
+        .setMask(mask);
+      transitionGroup.add(base);
+    }
+
+    // 4. Create additional layers
+    domainProfile.background.layers.forEach((layer: any) => {
+      // Logic from createLayer but localized to transitionGroup with mask
+      const color = parseInt(layer.color.replace('#', ''), 16);
+      const layerElement = this.createLayerElement(layer, color);
+      if (layerElement) {
+        layerElement.setMask(mask);
+        transitionGroup.add(layerElement);
+      }
+    });
+
+    // 5. Animate the Mask Expansion
+    const maxRadius = Math.sqrt(width * width + height * height);
     this.scene.tweens.add({
-      targets: fadeRect,
-      alpha: 1,
-      duration: 400,
+      targets: { radius: 0 },
+      radius: maxRadius,
+      duration: 1200,
+      ease: 'Cubic.easeInOut',
+      onUpdate: (tween: Phaser.Tweens.Tween) => {
+        const radius = tween.getValue() as number;
+        maskGraphics.clear();
+        maskGraphics.fillStyle(0xffffff);
+        maskGraphics.fillCircle(x, y, radius);
+      },
       onComplete: () => {
-        // Clear previous background elements if any
+        // Clear OLD background
         this.bgGroup.clear(true, true);
 
-        // Fill with base color
-        const baseColor = parseInt(domainProfile.background.base.replace('#', ''), 16);
-        this.baseOverlay = this.scene.add.rectangle(0, 0, this.scene.scale.width, this.scene.scale.height, baseColor)
-          .setOrigin(0)
-          .setDepth(-101);
-        this.bgGroup.add(this.baseOverlay);
-
-        // Render each layer
-        domainProfile.background.layers.forEach((layer: any) => {
-          this.createLayer(layer);
+        // Transfer new elements to the stable bgGroup
+        transitionGroup.getChildren().forEach((child: any) => {
+          child.clearMask();
+          this.bgGroup.add(child);
         });
 
-        fadeRect.destroy();
+        transitionGroup.destroy();
+        maskGraphics.destroy();
+
         if (onComplete) onComplete();
       }
     });
   }
 
-  createLayer(layer: any) {
-    const color = parseInt(layer.color.replace('#', ''), 16);
+  // Helper to create layer elements (refactored from createLayer)
+  private createLayerElement(layer: any, color: number): any {
     const { width, height } = this.scene.scale;
-
     switch (layer.type) {
       case 'CIRCUIT_LAVA': {
-        // Generate a simple circuit texture
-        const g = this.scene.make.graphics({ x: 0, y: 0 });
-        g.lineStyle(2, 0xffffff, 0.5);
-        g.strokeRect(0, 0, 64, 64);
-        g.moveTo(32, 0).lineTo(32, 64);
-        g.moveTo(0, 32).lineTo(64, 32);
-        g.generateTexture('tex_circuit', 64, 64);
-        g.destroy();
-
         const ts = this.scene.add.tileSprite(0, 0, width, height, 'tex_circuit')
-          .setOrigin(0)
-          .setDepth(-90)
-          .setAlpha(layer.opacity)
-          .setTint(color);
-        
-        this.scene.events.on('update', () => {
-          if (ts.active) {
-            ts.tilePositionX += layer.speed * 10;
-            ts.tilePositionY += layer.speed * 5;
-          }
-        });
-        this.bgGroup.add(ts);
-        break;
+          .setOrigin(0).setDepth(-90).setAlpha(layer.opacity).setTint(color).setScrollFactor(0);
+        this.scene.events.on('update', () => { if (ts.active) { ts.tilePositionX += (layer.speed ?? 0) * 10; ts.tilePositionY += (layer.speed ?? 0) * 5; } });
+        return ts;
       }
       case 'CODE_RAIN': {
-        const emitter = this.scene.add.particles(0, 0, 'tex_glyph', {
-          x: { min: 0, max: width },
-          y: -20,
-          speedY: { min: 100, max: 300 },
-          speedX: { min: -10, max: 10 },
-          lifespan: 2000,
-          alpha: layer.opacity,
-          tint: color,
-          frequency: 50,
-          scale: { min: 0.5, max: 1 }
-        }).setDepth(-90);
-        this.bgGroup.add(emitter);
-        break;
+        return this.scene.add.particles(0, 0, 'tex_glyph', {
+          x: { min: 0, max: width }, y: -20, speedY: { min: 100, max: 300 }, speedX: { min: -10, max: 10 },
+          lifespan: 2000, alpha: layer.opacity, tint: color, frequency: 50, scale: { min: 0.5, max: 1 }
+        }).setDepth(-90).setScrollFactor(0);
       }
       case 'VOID_GRID': {
-        const g = this.scene.add.graphics().setDepth(-90);
+        const g = this.scene.add.graphics().setDepth(-90).setScrollFactor(0);
         const vanishingPoint = { x: width / 2, y: height * 0.3 };
         this.scene.events.on('update', () => {
           if (!g.active) return;
           g.clear();
           const pulse = (Math.sin(this.scene.time.now / 500) + 1) / 2;
           g.lineStyle(2, color, layer.opacity * pulse);
-          
-          // Draw grid
-          for (let i = 0; i <= 10; i++) {
-            const x = (width / 10) * i;
-            g.moveTo(x, height).lineTo(vanishingPoint.x, vanishingPoint.y);
-          }
-          for (let i = 0; i <= 5; i++) {
-            const y = vanishingPoint.y + (height - vanishingPoint.y) * (i / 5);
-            g.moveTo(0, y).lineTo(width, y);
-          }
+          for (let i = 0; i <= 10; i++) g.moveTo((width / 10) * i, height).lineTo(vanishingPoint.x, vanishingPoint.y);
+          for (let i = 0; i <= 5; i++) g.moveTo(0, vanishingPoint.y + (height - vanishingPoint.y) * (i / 5)).lineTo(width, vanishingPoint.y + (height - vanishingPoint.y) * (i / 5));
         });
-        this.bgGroup.add(g);
-        break;
+        return g;
       }
       case 'BONE_FIELD': {
+        const container = this.scene.add.container(0, 0).setDepth(-90).setScrollFactor(0);
         for (let i = 0; i < 50; i++) {
           const x = Phaser.Math.Between(0, width);
           const y = Phaser.Math.Between(height - 100, height);
           const shard = this.scene.add.image(x, y, 'tex_shard')
             .setRotation(Phaser.Math.FloatBetween(0, Math.PI * 2))
             .setAlpha(layer.opacity)
-            .setTint(color)
-            .setDepth(-90);
-          this.bgGroup.add(shard);
+            .setTint(color);
+          container.add(shard);
         }
-        break;
+        return container;
       }
       case 'WATER_MIRROR': {
-        const g = this.scene.add.graphics().setDepth(-90);
+        const g = this.scene.add.graphics().setDepth(-90).setScrollFactor(0);
         this.scene.events.on('update', () => {
           if (!g.active) return;
           g.clear();
@@ -135,24 +158,16 @@ export class BackgroundFactory {
           g.fillStyle(color, layer.opacity);
           g.fillRect(0, height - 80 + wave, width, 80);
         });
-        this.bgGroup.add(g);
-        break;
+        return g;
       }
       case 'STAR_COLLAPSE': {
-        const emitter = this.scene.add.particles(width / 2, height / 2, 'tex_orb', {
+        return this.scene.add.particles(width / 2, height / 2, 'tex_orb', {
           emitZone: { type: 'random', source: new Phaser.Geom.Rectangle(0, 0, width, height) } as any,
-          speed: -200,
-          lifespan: 1000,
-          alpha: layer.opacity,
-          tint: color,
-          scale: { start: 1, end: 0 }
-        }).setDepth(-90).setPosition(width / 2, height / 2);
-        // Important: manually move particles to center
-        this.bgGroup.add(emitter);
-        break;
+          speed: -200, lifespan: 1000, alpha: layer.opacity, tint: color, scale: { start: 1, end: 0 }
+        }).setDepth(-90).setScrollFactor(0);
       }
       case 'FOREST_DARK': {
-        const g = this.scene.add.graphics().setDepth(-90);
+        const g = this.scene.add.graphics().setDepth(-90).setScrollFactor(0);
         g.fillStyle(color, layer.opacity);
         for (let i = 0; i < 15; i++) {
           const x = (width / 15) * i;
@@ -160,24 +175,22 @@ export class BackgroundFactory {
           g.fillRect(x, height - h, 30, h);
           g.fillTriangle(x - 20, height - h, x + 50, height - h, x + 15, height - h - 50);
         }
-        this.bgGroup.add(g);
-        break;
+        return g;
       }
       case 'SAND_STORM': {
-        const emitter = this.scene.add.particles(0, 0, 'tex_spark', {
-          x: { min: 0, max: width },
-          y: height + 20,
-          speedY: { min: -100, max: -300 },
-          speedX: { min: -50, max: 50 },
-          lifespan: 1500,
-          alpha: layer.opacity,
-          tint: color,
-          frequency: 20
-        }).setDepth(-90);
-        this.bgGroup.add(emitter);
-        break;
+        return this.scene.add.particles(0, 0, 'tex_spark', {
+          x: { min: 0, max: width }, y: height + 20, speedY: { min: -100, max: -300 }, speedX: { min: -50, max: 50 },
+          lifespan: 1500, alpha: layer.opacity, tint: color, frequency: 20
+        }).setDepth(-90).setScrollFactor(0);
       }
+      default: return null;
     }
+  }
+
+  createLayer(layer: any) {
+    const color = parseInt(layer.color.replace('#', ''), 16);
+    const element = this.createLayerElement(layer, color);
+    if (element) this.bgGroup.add(element);
   }
 
   deactivate(onComplete: () => void) {

@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import PreloaderScene from '$lib/scenes/PreloaderScene';
 import MainScene from '$lib/scenes/MainScene';
 import HUDScene from '$lib/scenes/HUDScene';
 
@@ -18,7 +19,7 @@ export const getGameConfig = (containerId: string): Phaser.Types.Core.GameConfig
       debug: false
     }
   },
-  scene: [MainScene, HUDScene],
+  scene: [PreloaderScene, MainScene, HUDScene],
   transparent: true,
   backgroundColor: 'rgba(0,0,0,0)'
 });

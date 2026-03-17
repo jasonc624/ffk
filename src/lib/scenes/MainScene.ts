@@ -1,40 +1,22 @@
 import Phaser from 'phaser';
 import { getCharacter, type CharacterData } from '../storage';
-import { FRAME_DATA } from '../constants';
 import { preloadTextures } from '../vfx/textureFactory';
 import { VisualEffectCompiler } from '../vfx/VisualEffectCompiler';
 import { BackgroundFactory } from '../vfx/backgroundFactory';
-
-interface Sorcerer {
-  sprite: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
-  hp: number;
-  ce: number;
-  isUsingCE: boolean;
-  isAttacking: boolean;
-  isBlocking: boolean;
-  canDoubleJump: boolean;
-  data: CharacterData | null;
-  effects: {
-    ceInkOutline?: Phaser.GameObjects.Image;
-    ceGlowBody?: Phaser.GameObjects.Image;
-    ceWisps?: Phaser.GameObjects.Particles.ParticleEmitter;
-    ceCrackle?: Phaser.GameObjects.Particles.ParticleEmitter;
-    ceGroundMist?: Phaser.GameObjects.Particles.ParticleEmitter;
-    ceGroundGlow?: Phaser.GameObjects.Graphics;
-    ceGlowTween?: Phaser.Tweens.Tween;
-    ceGroundGlowTween?: Phaser.Tweens.Tween;
-  };
-}
+import { PlayerCharacter } from '../entities/PlayerCharacter';
+import { CPUCharacter } from '../entities/CPUCharacter';
+import { GameEntity } from '../entities/GameEntity';
+import { StandardDomain } from '../domains/StandardDomain';
+import { SUMMON_REGISTRY } from '../entities/registry';
+import { AbilityManager, type AbilityConfig } from '../entities/AbilityManager';
 
 export default class MainScene extends Phaser.Scene {
-  players: Sorcerer[] = [];
+  entities: GameEntity[] = [];
+  players: (PlayerCharacter | CPUCharacter)[] = [];
   hitboxes!: Phaser.Physics.Arcade.Group;
   platforms!: Phaser.Physics.Arcade.StaticGroup;
-  cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  keys!: any;
-  characterData: CharacterData | null = null;
 
-  stackCount = 0;
+  characterData: CharacterData | null = null;
   vfx!: VisualEffectCompiler;
   bgFactory!: BackgroundFactory;
   ceVignette?: Phaser.GameObjects.Graphics;
@@ -45,15 +27,12 @@ export default class MainScene extends Phaser.Scene {
 
   init() {
     this.characterData = getCharacter();
+    this.entities = [];
     this.players = [];
-    this.stackCount = 0;
   }
 
   preload() {
-    preloadTextures(this);
-    this.load.spritesheet('character', '/assets/character_sprite.png', { frameWidth: 128, frameHeight: 128 });
-    this.load.spritesheet('rival_sprite', '/assets/smallpox_deity.png', { frameWidth: 128, frameHeight: 128 });
-    this.load.image('shibuya_bg', '/assets/shibuya_station.jpg');
+    // Assets are now pre-loaded in PreloaderScene
   }
 
   create() {
@@ -62,240 +41,243 @@ export default class MainScene extends Phaser.Scene {
     // Background
     const bg = this.add.image(width / 2, height / 2, 'shibuya_bg');
     bg.setDisplaySize(width, height);
-    bg.setDepth(-10);
-    bg.setAlpha(0.7);
+    bg.setDepth(-10).setAlpha(0.7);
+
+    // Play start transition sound
+    this.sound.play('transition', { volume: 0.6 });
 
     // Platforms
     this.platforms = this.physics.add.staticGroup();
     this.createPlatform(width / 2, height - 50, width, 40);
-    this.createPlatform(width * 0.25, height * 0.6, 200, 20);
-    this.createPlatform(width * 0.75, height * 0.6, 200, 20);
 
     // Animations
     this.createAnimations('character');
     this.createAnimations('rival_sprite');
+    Object.values(SUMMON_REGISTRY).forEach(config => {
+      this.createAnimationsFromRegistry(config);
+    });
+
+    // Controls
+    const keys = this.input.keyboard!.addKeys('W,A,S,D,J,K,L,U,Q,E,F,SHIFT,SPACE,ENTER,NUMPAD_ONE,NUMPAD_TWO,NUMPAD_THREE,NUMPAD_ZERO') as any;
+    const cursors = this.input.keyboard!.createCursorKeys();
 
     // Create Sorcerers
-    this.players.push(this.createSorcerer(200, height - 200, 'character', this.characterData));
-    
-    // Player 2 - The Rival (Smallpox Deity)
-    const rivalData = {
-      ...this.characterData,
-      name: 'Rival',
-      color: '#ff4a4a',
-      technique: { ...this.characterData?.technique, visualProfile: { ...this.characterData?.technique.visualProfile, color: '#ff4a4a' } }
-    } as any;
-    this.players.push(this.createSorcerer(width - 200, height - 200, 'rival_sprite', rivalData));
-    this.players[1].sprite.setFlipX(true);
+    const p1 = new PlayerCharacter(this, {
+      id: 'p1',
+      name: this.characterData?.name || 'Sorcerer',
+      team: 'player',
+      data: this.characterData!,
+      controls: {
+        left: keys.A,
+        right: keys.D,
+        up: keys.W,
+        down: keys.S,
+        jump: keys.SPACE,
+        light: keys.J,
+        heavy: keys.K,
+        special: keys.L,
+        ability2: keys.E,
+        ability3: keys.F,
+        ce: keys.SHIFT,
+        domain: keys.Q
+      }
+    });
+    p1.spawn(200, height - 200);
+
+    // Default abilities for testing
+    const defaultAbilities: AbilityConfig[] = [
+      { slot: 'Ability1', name: 'Black Flash', key: 'L', cost: { cursedEnergy: 15 }, cooldown: 4000 },
+      { slot: 'Ability2', name: 'Cursed Speech', key: 'E', cost: { throatStrain: 30 }, cooldown: 8000 },
+      { slot: 'Ability3', name: 'Divergent Fist', key: 'F', cost: { cursedEnergy: 10 }, cooldown: 20000 }
+    ];
+
+    p1.abilityManager = new AbilityManager(p1, this.characterData?.abilities || defaultAbilities);
+
+    p1.activeDomain = new StandardDomain(this, {
+      id: 'p1_domain',
+      name: this.characterData?.domain.name || 'Domain',
+      ownerId: 'p1',
+      cost: 0, // Unblocked for testing
+      cooldownTurns: 0, // Unblocked for testing
+      visualProfile: p1.visualProfile,
+      clashProfile: {}
+    });
+
+    const p2 = new CPUCharacter(this, {
+      id: 'p2',
+      name: 'Rival Sorcerer',
+      team: 'opponent',
+      data: {
+        ...this.characterData!,
+        name: 'Rival Sorcerer',
+        color: '#ff4a4a',
+        stats: {
+          cursedEnergy: 120,
+          domainRefinement: 8, // Higher refinement for testing
+          physicalStrength: 12,
+          cursedEnergyControl: 10
+        }
+      } as any
+    });
+    p2.spawn(width - 200, height - 200);
+    p2.sprite.setFlipX(true);
+
+    p2.activeDomain = new StandardDomain(this, {
+      id: 'p2_domain',
+      name: 'Malevolent Workspace',
+      ownerId: 'p2',
+      cost: 0, // 0 for easy testing
+      cooldownTurns: 0,
+      visualProfile: {
+        ...this.characterData!.technique.visualProfile,
+        color: '#ff4a4a'
+      },
+      clashProfile: {
+        clashBonus: 2
+      }
+    });
+
+    this.players = [p1, p2];
+    this.entities = [p1, p2];
 
     // Hitboxes
     this.hitboxes = this.physics.add.group({ allowGravity: false });
 
     // Collisions
     this.physics.add.collider(this.players.map(p => p.sprite), this.platforms);
-    this.physics.add.overlap(this.hitboxes, this.players.map(p => p.sprite), this.handleHit as any, undefined, this);
+    // Add player-to-player collision
+    this.physics.add.collider(this.players[0].sprite, this.players[1].sprite);
+    
+    // Overlap for attacks
+    this.players.forEach(player => {
+      this.physics.add.overlap(this.hitboxes, player.sprite, this.handleHitOverlap as any, undefined, this);
+    });
 
-    // Controls
-    this.cursors = this.input.keyboard!.createCursorKeys();
-    this.keys = this.input.keyboard!.addKeys('W,A,S,D,J,K,L,U,SHIFT,SPACE,ENTER,NUMPAD_ONE,NUMPAD_TWO,NUMPAD_THREE,NUMPAD_ZERO');
-
-    // VFX
+    // Initial Systems
     this.vfx = new VisualEffectCompiler(this, this.scene.get('HUDScene'));
     this.bgFactory = new BackgroundFactory(this);
-
-    // Start HUD
     this.scene.launch('HUDScene', { players: this.players });
 
-    this.createCEParticles();
+    // Clash listener
+    this.events.on('clashResolved', this.onClashResolved, this);
   }
 
   createAnimations(texture: string) {
-    const keys = ['idle', 'kick', 'punch', 'special', 'domain', 'jump', 'descend'];
-    const frames = [0, 1, 4, 5, 9, 8, 12];
-    keys.forEach((key, i) => {
-      const animKey = `${texture}_${key}`;
+    if (texture === 'character') {
+      const rowWidth = 16; // 16 frames per row
+      const config = [
+        { key: 'walk', start: 0, end: 15, rate: 12, repeat: -1 },
+        { key: 'punch', start: rowWidth * 1, end: rowWidth * 1 + 31, rate: 24 }, // Full extension + recoil
+        { key: 'jump', start: rowWidth * 2, end: rowWidth * 2 + 15, rate: 12 },
+        { key: 'descend', start: rowWidth * 3, end: rowWidth * 3 + 15, rate: 12 },
+        { key: 'domain', start: rowWidth * 4, end: rowWidth * 4 + 31, rate: 12 },
+        { key: 'idle', start: rowWidth * 5, end: rowWidth * 5 + 15, rate: 12, repeat: -1 },
+        { key: 'kick', start: rowWidth * 6, end: rowWidth * 6, rate: 1 },
+        { key: 'hurt', start: rowWidth * 7, end: rowWidth * 7, rate: 1 },
+        { key: 'special', start: rowWidth * 4, end: rowWidth * 4 + 31, rate: 18 }
+      ];
+
+      config.forEach(anim => {
+        const animKey = `${texture}_${anim.key}`;
+        if (!this.anims.exists(animKey)) {
+          this.anims.create({
+            key: animKey,
+            frames: this.anims.generateFrameNumbers(texture, { start: anim.start, end: anim.end }),
+            frameRate: anim.rate,
+            repeat: anim.repeat || 0
+          });
+        }
+      });
+    } else {
+      // Legacy/Rival fallback
+      const keys = ['idle', 'kick', 'punch', 'special', 'domain', 'jump', 'descend'];
+      const frames = [0, 1, 4, 5, 9, 8, 12];
+      keys.forEach((key, i) => {
+        const animKey = `${texture}_${key}`;
+        if (!this.anims.exists(animKey)) {
+          this.anims.create({
+            key: animKey,
+            frames: [{ key: texture, frame: frames[i] }],
+            frameRate: 1
+          });
+        }
+      });
+    }
+  }
+
+  createAnimationsFromRegistry(config: any) {
+    Object.entries(config.animations).forEach(([key, anim]: [string, any]) => {
+      const animKey = `${config.texture}_${key}`;
       if (!this.anims.exists(animKey)) {
         this.anims.create({
           key: animKey,
-          frames: [{ key: texture, frame: frames[i] }],
-          frameRate: 1
+          frames: this.anims.generateFrameNumbers(config.texture, { frames: anim.frames }),
+          frameRate: anim.frameRate || 1,
+          repeat: anim.repeat !== undefined ? anim.repeat : 0
         });
       }
     });
   }
 
-  createSorcerer(x: number, y: number, texture: string, data: CharacterData | null): Sorcerer {
-    const sprite = this.physics.add.sprite(x, y, texture);
-    sprite.setScale(0.8);
-    sprite.setDepth(2);
-    sprite.body.setSize(40, 80);
-    sprite.body.setOffset(44, 48);
-    sprite.body.setCollideWorldBounds(true);
-    sprite.play(`${texture}_idle`);
-
-    return {
-      sprite,
-      hp: 100,
-      ce: 100,
-      isUsingCE: false,
-      isAttacking: false,
-      isBlocking: false,
-      canDoubleJump: true,
-      data,
-      effects: {}
-    };
-  }
-
   createPlatform(x: number, y: number, w: number, h: number) {
-    const p = this.platforms.create(x, y, 'shibuya_bg'); // Dummy texture
-    p.setDisplaySize(w, h);
-    p.setAlpha(0); // Invisible collideable area
-    p.refreshBody();
-
+    const p = this.platforms.create(x, y, 'shibuya_bg');
+    p.setDisplaySize(w, h).setAlpha(0).refreshBody();
     const g = this.add.graphics();
-    g.fillStyle(0xffffff, 0.05);
-    g.fillRect(x - w / 2, y - h / 2, w, h);
-    g.lineStyle(2, 0xffffff, 0.1);
-    g.strokeRect(x - w / 2, y - h / 2, w, h);
+    g.fillStyle(0xffffff, 0.05).fillRect(x - w / 2, y - h / 2, w, h);
+    g.lineStyle(2, 0xffffff, 0.1).strokeRect(x - w / 2, y - h / 2, w, h);
   }
 
-  createCEParticles() {
-    this.add.particles(0, 0, 'tex_orb_soft', {
-      emitZone: { type: 'random', source: new Phaser.Geom.Rectangle(0, 0, this.scale.width, this.scale.height) } as any,
-      speedX: { min: -10, max: 10 },
-      speedY: { min: -20, max: -5 },
-      scale: { start: 0.1, end: 0.3 },
-      alpha: { start: 0.1, end: 0 },
-      lifespan: 3000,
-      tint: 0x4a9eff,
-      frequency: 200,
-      quantity: 1,
-    }).setDepth(-5);
-  }
-
-  update() {
-    if (this.players.length === 0) return;
-
-    // Player 1 Controls (WASD)
-    this.handleSorcererInput(this.players[0], {
-      left: this.keys.A,
-      right: this.keys.D,
-      up: this.keys.W,
-      down: this.keys.S,
-      jump: this.keys.SPACE,
-      light: this.keys.J,
-      heavy: this.keys.K,
-      special: this.keys.L,
-      ce: this.keys.SHIFT,
-      domain: this.keys.U
-    });
-
-    // Player 2 Controls (Arrows)
-    if (this.players.length > 1) {
-      this.handleSorcererInput(this.players[1], {
-        left: this.cursors.left,
-        right: this.cursors.right,
-        up: this.cursors.up,
-        down: this.cursors.down,
-        jump: this.cursors.up,
-        light: this.keys.NUMPAD_ONE,
-        heavy: this.keys.NUMPAD_TWO,
-        special: this.keys.NUMPAD_THREE,
-        ce: this.keys.ENTER,
-        domain: this.keys.NUMPAD_ZERO
-      });
-    }
+  update(time: number, delta: number) {
+    this.entities.forEach(e => e.update(time, delta));
 
     // Sync HUD
     this.events.emit('updateHUD', {
       players: this.players.map(p => ({
-        hp: p.hp,
-        ce: p.ce,
-        name: p.data?.name,
-        color: p.data?.color,
-        isUsingCE: p.isUsingCE,
-        canExpandDomain: p.ce >= 100
+        id: p.id,
+        hp: p.currentHp,
+        ce: p.cursedEnergy.current,
+        name: p.name,
+        color: p.visualProfile?.color || '#ffffff',
+        isUsingCE: (p as any).isUsingCE,
+        canExpandDomain: p.cursedEnergy.current >= 100,
+        throatStrain: p.throatStrain,
+        abilities: p.abilityManager ? Array.from(p.abilityManager.slots.values()).map(s => ({
+          slot: s.config.slot,
+          key: s.config.key,
+          name: s.config.name,
+          cooldownFraction: p.abilityManager!.getCooldownFraction(s.config.slot),
+          remainingCooldown: s.remainingCooldown
+        })) : []
       }))
     });
   }
 
-  handleSorcererInput(sorcerer: Sorcerer, controls: any) {
-    const { sprite } = sorcerer;
-    const speed = 300;
-    const jumpVelocity = -600;
+  handleHitOverlap(hb: any, targetSprite: Phaser.Physics.Arcade.Sprite) {
+    const target = this.entities.find(e => e.sprite === targetSprite);
+    const owner = hb.owner;
 
-    if (sorcerer.isAttacking) return;
+    if (!target || !owner || target === owner) return;
 
-    // Movement
-    if (controls.left.isDown) {
-      sprite.body.setVelocityX(-speed);
-      sprite.setFlipX(true);
-    } else if (controls.right.isDown) {
-      sprite.body.setVelocityX(speed);
-      sprite.setFlipX(false);
-    } else {
-      sprite.body.setVelocityX(0);
-    }
+    target.receiveDamage(hb.damage || 5, 'PHYSICAL', owner);
 
-    // Jump
-    const onGround = sprite.body.blocked.down;
-    if (Phaser.Input.Keyboard.JustDown(controls.jump)) {
-      if (onGround) {
-        sprite.body.setVelocityY(jumpVelocity);
-      } else if (sorcerer.canDoubleJump) {
-        sprite.body.setVelocityY(jumpVelocity * 0.8);
-        sorcerer.canDoubleJump = false;
-        this.createJumpBurst(sprite.x, sprite.y);
-      }
+    const dir = owner.sprite.x < target.sprite.x ? 1 : -1;
+    if (target.sprite.body) {
+      const body = target.sprite.body as Phaser.Physics.Arcade.Body;
+      body.setVelocity(600 * dir, -300);
     }
-    if (onGround) sorcerer.canDoubleJump = true;
+    hb.destroy();
+  }
 
-    // Fast Fall / Block
-    if (controls.down.isDown) {
-      if (!onGround) sprite.body.setVelocityY(800);
-      else {
-        sorcerer.isBlocking = true;
-        sprite.setAlpha(0.6);
-        sprite.body.setVelocityX(0);
-      }
-    } else {
-      sorcerer.isBlocking = false;
-      sprite.setAlpha(1);
-    }
+  getEntityById(id: string) {
+    return this.entities.find(e => e.id === id);
+  }
 
-    // Anim
-    if (!onGround) {
-      if (sprite.body.velocity.y > 0) sprite.play('descend', true);
-      else sprite.play('jump', true);
-    } else if (sprite.body.velocity.x !== 0) {
-      sprite.play('kick', true);
-    } else {
-      sprite.play('idle', true);
-    }
+  getOpponentOf(entity: GameEntity) {
+    return this.entities.find(e => e.team !== entity.team && (e instanceof PlayerCharacter || e instanceof CPUCharacter));
+  }
 
-    // Attack triggers
-    if (Phaser.Input.Keyboard.JustDown(controls.light)) this.performAttack(sorcerer, 'light');
-    if (Phaser.Input.Keyboard.JustDown(controls.heavy)) this.performAttack(sorcerer, 'heavy');
-    if (Phaser.Input.Keyboard.JustDown(controls.special)) this.performSpecial(sorcerer);
-    if (Phaser.Input.Keyboard.JustDown(controls.domain)) this.expandDomain(sorcerer);
-
-    // CE Focus
-    if (Phaser.Input.Keyboard.JustDown(controls.ce) && sorcerer.ce > 0) {
-      this.activateCEAura(sorcerer);
-    }
-    if (sorcerer.isUsingCE) {
-      sorcerer.ce -= 15 / 60;
-      if (sorcerer.ce <= 0) {
-        sorcerer.ce = 0;
-        this.deactivateCEAura(sorcerer);
-      }
-      this.updateCEAura(sorcerer);
-    } else if (sorcerer.ce < 100) {
-      sorcerer.ce += 8 / 60;
-    }
-    if (Phaser.Input.Keyboard.JustUp(controls.ce)) {
-      this.deactivateCEAura(sorcerer);
-    }
+  getAllEntities() {
+    return this.entities;
   }
 
   createJumpBurst(x: number, y: number) {
@@ -303,61 +285,42 @@ export default class MainScene extends Phaser.Scene {
     this.tweens.add({ targets: burst, scale: 2, alpha: 0, duration: 200, onComplete: () => burst.destroy() });
   }
 
-  activateCEAura(sorcerer: Sorcerer) {
-    if (sorcerer.isUsingCE) return;
-    sorcerer.isUsingCE = true;
+  activateCEAura(sorcerer: any) {
     const { sprite } = sorcerer;
-    const ceColor = sorcerer.data?.color ? parseInt(sorcerer.data.color.replace('#', ''), 16) : 0x4a9eff;
+    const ceColor = sorcerer.visualProfile?.color ? parseInt(sorcerer.visualProfile.color.replace('#', ''), 16) : 0x4a9eff;
 
-    sorcerer.effects.ceInkOutline = this.add.image(sprite.x, sprite.y, sprite.texture.key).setFrame(sprite.frame.name).setTint(0x000000).setScale(sprite.scaleX * 1.18, sprite.scaleY * 1.22).setAlpha(0.85).setDepth(sprite.depth - 2);
-    sorcerer.effects.ceGlowBody = this.add.image(sprite.x, sprite.y, sprite.texture.key).setFrame(sprite.frame.name).setTint(ceColor).setScale(sprite.scaleX * 1.10, sprite.scaleY * 1.12).setAlpha(0.7).setDepth(sprite.depth - 1).setBlendMode(Phaser.BlendModes.ADD);
+    sorcerer.ceInkOutline = this.add.image(sprite.x, sprite.y, sprite.texture.key).setFrame(sprite.frame.name).setTint(0x000000).setScale(sprite.scaleX * 1.18, sprite.scaleY * 1.22).setAlpha(0.85).setDepth(sprite.depth - 2);
+    sorcerer.ceGlowBody = this.add.image(sprite.x, sprite.y, sprite.texture.key).setFrame(sprite.frame.name).setTint(ceColor).setScale(sprite.scaleX * 1.10, sprite.scaleY * 1.12).setAlpha(0.7).setDepth(sprite.depth - 1).setBlendMode(Phaser.BlendModes.ADD);
 
-    sorcerer.effects.ceGlowTween = this.tweens.add({
-      targets: [sorcerer.effects.ceGlowBody, sorcerer.effects.ceInkOutline],
+    sorcerer.ceGlowTween = this.tweens.add({
+      targets: [sorcerer.ceGlowBody, sorcerer.ceInkOutline],
       alpha: { from: 0.6, to: 0.9 },
       duration: 400,
       yoyo: true,
       repeat: -1
     });
 
-    sorcerer.effects.ceWisps = this.add.particles(0, 0, 'tex_wisp', {
-      follow: sprite,
-      emitZone: { type: 'random', source: new Phaser.Geom.Rectangle(-20, -64, 40, 128) } as any,
-      speedY: { min: -160, max: -60 },
-      scale: { start: 0.5, end: 0.05 },
-      alpha: { start: 0.55, end: 0 },
-      lifespan: 700,
-      tint: ceColor,
-      blendMode: 'ADD',
-      quantity: 2,
-    }).setDepth(sprite.depth + 2);
-
-    sorcerer.effects.ceGroundGlow = this.add.graphics().setDepth(sprite.depth - 4).fillStyle(ceColor, 0.3).fillEllipse(0, 0, 80, 16);
+    sorcerer.ceGroundGlow = this.add.graphics().setDepth(sprite.depth - 4).fillStyle(ceColor, 0.3).fillEllipse(0, 0, 80, 16);
     this.updateVignette();
   }
 
-  updateCEAura(sorcerer: Sorcerer) {
-    const { sprite, effects } = sorcerer;
-    if (effects.ceInkOutline) effects.ceInkOutline.setPosition(sprite.x, sprite.y).setFrame(sprite.frame.name).setFlipX(sprite.flipX);
-    if (effects.ceGlowBody) effects.ceGlowBody.setPosition(sprite.x, sprite.y).setFrame(sprite.frame.name).setFlipX(sprite.flipX);
-    if (effects.ceGroundGlow) effects.ceGroundGlow.setPosition(sprite.x, sprite.y + 58);
+  updateCEAura(sorcerer: any) {
+    const { sprite } = sorcerer;
+    if (sorcerer.ceInkOutline) sorcerer.ceInkOutline.setPosition(sprite.x, sprite.y).setFrame(sprite.frame.name).setFlipX(sprite.flipX);
+    if (sorcerer.ceGlowBody) sorcerer.ceGlowBody.setPosition(sprite.x, sprite.y).setFrame(sprite.frame.name).setFlipX(sprite.flipX);
+    if (sorcerer.ceGroundGlow) sorcerer.ceGroundGlow.setPosition(sprite.x, sprite.y + 58);
   }
 
-  deactivateCEAura(sorcerer: Sorcerer) {
-    if (!sorcerer.isUsingCE) return;
-    sorcerer.isUsingCE = false;
-    const { effects } = sorcerer;
-
-    if (effects.ceGlowBody) effects.ceGlowBody.destroy();
-    if (effects.ceInkOutline) effects.ceInkOutline.destroy();
-    if (effects.ceWisps) effects.ceWisps.destroy();
-    if (effects.ceGroundGlow) effects.ceGroundGlow.destroy();
-    effects.ceGlowTween?.stop();
+  deactivateCEAura(sorcerer: any) {
+    if (sorcerer.ceGlowBody) sorcerer.ceGlowBody.destroy();
+    if (sorcerer.ceInkOutline) sorcerer.ceInkOutline.destroy();
+    if (sorcerer.ceGroundGlow) sorcerer.ceGroundGlow.destroy();
+    if (sorcerer.ceGlowTween) sorcerer.ceGlowTween.stop();
     this.updateVignette();
   }
 
   updateVignette() {
-    const isAnyUsingCE = this.players.some(p => p.isUsingCE);
+    const isAnyUsingCE = this.players.some(p => (p as any).isUsingCE);
     if (isAnyUsingCE && !this.ceVignette) {
       this.ceVignette = this.add.graphics().setScrollFactor(0).setDepth(1).setBlendMode(Phaser.BlendModes.MULTIPLY);
       this.ceVignette.fillStyle(0x4a9eff, 0.1).fillRect(0, 0, this.scale.width, this.scale.height);
@@ -367,73 +330,33 @@ export default class MainScene extends Phaser.Scene {
     }
   }
 
-  performAttack(sorcerer: Sorcerer, type: 'light' | 'heavy') {
-    if (sorcerer.isAttacking || sorcerer.isBlocking) return;
-    sorcerer.isAttacking = true;
-    const data = FRAME_DATA[type];
-    sorcerer.sprite.play(type === 'light' ? 'punch' : 'kick', true);
-
-    this.time.delayedCall(data.startup * 16.6, () => {
-      const dir = sorcerer.sprite.flipX ? -1 : 1;
-      const hb = this.add.rectangle(sorcerer.sprite.x + (50 * dir), sorcerer.sprite.y, 60, 40, 0xffffff, 0);
-      this.hitboxes.add(hb);
-      (hb.body as any).setAllowGravity(false);
-      (hb as any).owner = sorcerer;
-      (hb as any).damage = data.damage;
-      this.time.delayedCall(data.active * 16.6, () => hb.destroy());
-      this.time.delayedCall(data.recovery * 16.6, () => sorcerer.isAttacking = false);
-    });
+  performBurst(sorcerer: any) {
+    const burst = this.add.circle(sorcerer.sprite.x, sorcerer.sprite.y, 100, 0x4a9eff, 0.2);
+    this.physics.add.existing(burst);
+    (burst.body as any).setAllowGravity(false);
+    (burst as any).owner = sorcerer;
+    (burst as any).damage = 25;
+    this.hitboxes.add(burst);
+    this.tweens.add({ targets: burst, scale: 2, alpha: 0, duration: 300, onComplete: () => burst.destroy() });
   }
 
-  performSpecial(sorcerer: Sorcerer) {
-    if (sorcerer.ce < FRAME_DATA.special.cost) return;
-    sorcerer.ce -= FRAME_DATA.special.cost;
-    sorcerer.isAttacking = true;
-    sorcerer.sprite.play('special', true);
-    this.time.delayedCall(FRAME_DATA.special.startup * 16.6, () => {
-      const burst = this.add.circle(sorcerer.sprite.x, sorcerer.sprite.y, 100, 0x4a9eff, 0.2);
-      this.physics.add.existing(burst);
-      (burst.body as any).setAllowGravity(false);
-      (burst as any).owner = sorcerer;
-      (burst as any).damage = FRAME_DATA.special.damage;
-      this.hitboxes.add(burst);
-      this.tweens.add({ targets: burst, scale: 2, alpha: 0, duration: 300, onComplete: () => burst.destroy() });
-      this.time.delayedCall(FRAME_DATA.special.recovery * 16.6, () => sorcerer.isAttacking = false);
-    });
-  }
+  onClashResolved(data: any) {
+    const { outcome, winner, loser } = data;
+    console.log(`Clash Resolved: ${outcome}`);
 
-  expandDomain(sorcerer: Sorcerer) {
-    if (sorcerer.ce < 100) return;
-    sorcerer.ce -= 100;
-    sorcerer.isAttacking = true;
-    sorcerer.sprite.play('domain', true);
-    this.bgFactory.activate(sorcerer.data?.technique.visualProfile, () => {
-      this.time.delayedCall(1000, () => sorcerer.isAttacking = false);
-    });
-  }
-
-  handleHit(hb: any, targetSprite: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody) {
-    const target = this.players.find(p => p.sprite === targetSprite);
-    const owner = hb.owner as Sorcerer;
-    if (!target || !owner || target === owner) return;
-    if (target.isBlocking) { hb.destroy(); return; }
-
-    target.hp -= hb.damage || 5;
-    target.sprite.setTint(0xffffff);
-    this.time.delayedCall(50, () => { if (target.sprite.active) target.sprite.clearTint(); });
-    
-    const dir = owner.sprite.x < target.sprite.x ? 1 : -1;
-    target.sprite.body.setVelocity(400 * dir, -200);
-    hb.destroy();
-
-    if (target.hp <= 0) this.respawnSorcerer(target);
-  }
-
-  respawnSorcerer(sorcerer: Sorcerer) {
-    sorcerer.hp = 100;
-    sorcerer.ce = 100;
-    const x = sorcerer === this.players[0] ? 200 : this.scale.width - 200;
-    sorcerer.sprite.setPosition(x, this.scale.height - 200);
-    sorcerer.sprite.play('idle', true);
+    if (outcome === 'CRUSHED_WIN' || outcome === 'WIN') {
+      loser.activeDomain.collapse('LOST_CLASH');
+      winner.activeDomain.status = 'ACTIVE';
+      this.bgFactory.activate(winner.activeDomain.visualProfile, winner.sprite.x, winner.sprite.y, () => { });
+      winner.activeDomain.executeSureHit(loser);
+    } else if (outcome === 'CONTESTED') {
+      winner.activeDomain.collapse('SHATTERED');
+      loser.activeDomain.collapse('SHATTERED');
+    } else {
+      winner.activeDomain.collapse('LOST_CLASH');
+      loser.activeDomain.status = 'ACTIVE';
+      this.bgFactory.activate(loser.activeDomain.visualProfile, loser.sprite.x, loser.sprite.y, () => { });
+      loser.activeDomain.executeSureHit(winner);
+    }
   }
 }

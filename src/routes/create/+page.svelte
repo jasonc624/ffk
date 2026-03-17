@@ -9,7 +9,7 @@
   let loading = $state(false);
   let loadingPhase = $state('Scanning cursed energy signature...');
   
-  const TOTAL_STEPS = 8;
+  const TOTAL_STEPS = 9;
   const loadingPhases = [
     "Scanning cursed Highland energy signature...",
     "Mapping personality to technique archetype...",
@@ -58,9 +58,15 @@
       ]
     },
     {
-      title: "What is a fear or weakness you carry?",
+      title: "What type of fear or weakness do you carry?",
       id: 'q5',
       hint: "In JJK, the greatest techniques often emerge from what haunts us.",
+      type: 'textarea'
+    },
+    {
+      title: "What type of women do you like?",
+      id: 'q_women_type',
+      hint: "Todo Aoi would like to know. Be honest.",
       type: 'textarea'
     },
     {
@@ -211,7 +217,7 @@
       </div>
       
       <div class="question-label mb-4 opacity-70">
-        {currentStep === 0 ? 'Designation' : `Question ${currentStep} / 7`}
+        {currentStep === 0 ? 'Designation' : `Question ${currentStep} / ${TOTAL_STEPS - 1}`}
       </div>
       
       <div class="question-text text-2xl font-light leading-relaxed mb-8">

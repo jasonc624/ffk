@@ -1,129 +1,32 @@
 import { json } from '@sveltejs/kit';
-import { generateText, Output } from 'ai';
-import { createGateway } from '@ai-sdk/gateway';
-import { env } from '$env/dynamic/private';
-import { z } from 'zod';
+import { CharacterAwakeningService } from '$lib/services/ai/CharacterAwakeningService';
+import { DomainVideoService } from '$lib/services/ai/DomainVideoService';
 import type { RequestHandler } from './$types';
-
-function getGateway() {
-  return createGateway({
-    apiKey: env.AI_GATEWAY_API_KEY,
-  });
-}
 
 export const POST: RequestHandler = async ({ request }) => {
   const { answers, sorcererName } = await request.json();
-  const gateway = getGateway();
-
-  const systemInstruction = `You are a Jujutsu Kaisen lore master and game designer. Your goal is to generate unique, lore-accurate cursed techniques and domains for sorcerers based on their personality and interests.
-
-The character JSON must also include a visualProfile field on the technique object.
-You must describe ALL visual effects using ONLY the following token vocabularies.
-Do not invent new token type names — only combine existing ones creatively.
-
-EMITTER types: DRIFT_UP, BURST_RADIAL, TRAIL, PULSE_RING, RAIN_DOWN, CONVERGE
-PARTICLE types: GLYPH, ORB, SHARD, VAPOR, SPARK, RING
-TARGET_FX types: TINT_PULSE, CHROMATIC, GLITCH, HEAT_HAZE, FLICKER, FREEZE, INVERT
-SCREEN_FX types: VIGNETTE, SHOCKWAVE, SLOWMO, FLASH, SCREENSHAKE
-HUD_FX types: STACK_TICK, BAR_DRAIN, STATUS_ICON, TEXT_POP
-BACKGROUND_LAYER types: CIRCUIT_LAVA, CODE_RAIN, VOID_GRID, BONE_FIELD, WATER_MIRROR, STAR_COLLAPSE, FOREST_DARK, SAND_STORM
-
-DESIGN RULES:
-- The technique MUST feel like a direct metaphorical extension of their actual hobbies and personality.
-- Use JJK's logic: techniques have precise rules, costs, and limitations.
-- The domain expansion should feel like a personal hell or paradise warped by their psyche.
-- Archetype: MUST be one of: ACCUMULATION, STACK_DEBUFF, or PROJECTILE.
-- Color: Return a valid hex color code.`;
-
-  const userPrompt = `Generate a cursed profile for:
-Name: ${sorcererName}
-Combat instinct: ${answers.q1}
-Core drive: ${answers.q2}
-Hobbies/interests: ${answers.q3}
-Mind type: ${answers.q4}
-Fear/weakness: ${answers.q5}
-Definition of winning: ${answers.q6}
-Cursed energy aesthetic: ${answers.q7}`;
-
-  const CharacterSchema = z.object({
-    perceived_grade: z.string().describe("The AI's estimation of the sorcerer's potential (e.g. Special Grade Potential)"),
-    epithet: z.string(),
-    archetype: z.enum(['ACCUMULATION', 'STACK_DEBUFF', 'PROJECTILE']),
-    technique: z.object({
-      name: z.string(),
-      description: z.string(),
-      mechanic: z.string(),
-      visualProfile: z.object({
-        casterColor: z.string(),
-        accentColor: z.string(),
-        onActivation: z.object({
-          caster: z.array(z.any()),
-          screen: z.array(z.any())
-        }),
-        onHit: z.object({
-          target: z.array(z.any()),
-          screen: z.array(z.any()),
-          hud: z.array(z.any())
-        }),
-        onMaxStacks: z.object({
-          target: z.array(z.any()),
-          screen: z.array(z.any()),
-          hud: z.array(z.any())
-        }),
-        onDomainExpansion: z.object({
-          background: z.object({
-            base: z.string(),
-            layers: z.array(z.object({
-              type: z.string(),
-              color: z.string(),
-              speed: z.number(),
-              opacity: z.number()
-            }))
-          }),
-          ambient: z.array(z.any()),
-          caster: z.array(z.any())
-        })
-      })
-    }),
-    domain: z.object({
-      name: z.string(),
-      description: z.string(),
-      mechanic: z.string()
-    }),
-    extensions: z.array(z.object({
-      name: z.string(),
-      description: z.string()
-    })),
-    stats: z.object({
-      cursedEnergy: z.number().min(0).max(100),
-      technicalSkill: z.number().min(0).max(100),
-      speed: z.number().min(0).max(100),
-      strength: z.number().min(0).max(100),
-      adaptability: z.number().min(0).max(100),
-      domainRefinement: z.number().min(0).max(100)
-    }),
-    color: z.string().regex(/^#[0-9A-F]{6}$/i)
-  });
+  const awakeningService = new CharacterAwakeningService();
+  const videoService = new DomainVideoService();
 
   try {
-    const result = await generateText({
-      model: gateway("google/gemini-3-flash"),
-      system: systemInstruction,
-      prompt: userPrompt,
-      temperature: 1,
-      output: Output.object({ schema: CharacterSchema }),
-      providerOptions: {
-        gateway: {
-          models: [
-            "alibaba/qwen3.5-flash",
-            "anthropic/claude-3-haiku-latest",
-          ],
-        } satisfies import("@ai-sdk/gateway").GatewayLanguageModelOptions,
-      },
-    });
+    // 1. Awaken the character and get their technique/domain profile
+    const characterData = await awakeningService.awaken(sorcererName, answers);
+
+    // 2. Generate the domain background video using the AI-generated domain metadata
+    try {
+      const videoUrl = await videoService.generateDomainVideo(
+        characterData.domain.name,
+        characterData.domain.description,
+        characterData.color
+      );
+      characterData.domain.videoUrl = videoUrl;
+    } catch (videoError) {
+      console.error('Domain Video Generation Failed:', videoError);
+      // We continue even if video fails so the character is still created
+    }
 
     return json({
-      ...result.output,
+      ...characterData,
       grade: 0,
       maxGrade: 0
     });
