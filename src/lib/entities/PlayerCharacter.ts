@@ -28,7 +28,8 @@ export class PlayerCharacter extends Character {
     (this.sprite.body as Phaser.Physics.Arcade.Body).setCollideWorldBounds(true);
     
     // Create hurtbox
-    this.hurtbox = this.scene.add.rectangle(x, y, 40, 80, 0xffffff, 0);
+    const debugAlpha = (this.scene as any).debugMode ? 0.2 : 0;
+    this.hurtbox = this.scene.add.rectangle(x, y, 40, 80, 0xffffff, debugAlpha);
     this.scene.physics.add.existing(this.hurtbox);
     (this.hurtbox.body as Phaser.Physics.Arcade.Body).setAllowGravity(false);
   }

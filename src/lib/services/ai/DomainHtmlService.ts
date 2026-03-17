@@ -73,7 +73,7 @@ Description: ${domainDescription}
 Return a single JSON object matching the requested schema.`;
 
     const result = await generateText({
-      model: ai("anthropic/claude-3-5-sonnet-latest"),
+      model: ai("anthropic/claude-sonnet-4.6"),
       system: systemPrompt,
       prompt: userPrompt,
       temperature: 1,

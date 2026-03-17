@@ -18,6 +18,8 @@ export default class MainScene extends Phaser.Scene {
   players: (PlayerCharacter | CPUCharacter)[] = [];
   hitboxes!: Phaser.Physics.Arcade.Group;
   platforms!: Phaser.Physics.Arcade.StaticGroup;
+  debugMode: boolean = false;
+  debugGraphics?: Phaser.GameObjects.Graphics;
 
   characterData: CharacterData | null = null;
   vfx!: VisualEffectCompiler;
@@ -86,6 +88,17 @@ export default class MainScene extends Phaser.Scene {
       }
     });
     p1.spawn(200, height - 200);
+
+    // Debug toggle
+    this.input.keyboard?.on('keydown-T', () => {
+      this.debugMode = !this.debugMode;
+      this.physics.world.drawDebug = this.debugMode;
+      if (this.physics.world.debugGraphic) {
+        this.physics.world.debugGraphic.clear();
+        this.physics.world.debugGraphic.setVisible(this.debugMode);
+      }
+      console.log(`[DEBUG] Debug mode ${this.debugMode ? 'ENABLED' : 'DISABLED'}`);
+    });
 
     // Default abilities for testing
     const defaultAbilities: AbilityConfig[] = [

@@ -3,10 +3,12 @@ import type { Character } from '../entities/Character';
 
 export class StandardDomain extends Domain {
   sureHitConfig: any;
+  damage: number = 25;
 
   constructor(scene: Phaser.Scene, config: any) {
     super(scene, config);
     this.sureHitConfig = config.sureHit;
+    this.damage = config.damage || 25;
   }
 
   executeSureHit(target: Character) {
@@ -21,7 +23,8 @@ export class StandardDomain extends Domain {
       // Apply effects to target
       this.sureHitConfig.effects.forEach((eff: any) => {
         if (eff.type === 'DAMAGE') {
-           target.receiveDamage(eff.amount, eff.archetype || 'BURST', (this.scene as any).getEntityById(this.ownerId));
+           const finalDamage = this.damage || eff.amount || 25;
+           target.receiveDamage(finalDamage, eff.archetype || 'BURST', (this.scene as any).getEntityById(this.ownerId));
         }
       });
     }

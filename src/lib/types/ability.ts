@@ -8,7 +8,7 @@ export interface AbilityConfig {
   };
   cooldown: number; // ms
   activeDuration?: number;
-  selfDamage?: number;
+  damage?: number;
   description?: string;
   archetype?: string;
 }

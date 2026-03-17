@@ -17,6 +17,8 @@ export abstract class Character extends GameEntity {
   };
   stats: CharacterData['stats'];
   technique: CharacterData['technique'];
+  domain: CharacterData['domain'];
+  abilities: CharacterData['abilities'] = [];
   activeDomain: Domain | null = null;
   rosterManager: RosterManager | null = null;
   abilityManager: AbilityManager | null = null;
@@ -50,6 +52,8 @@ export abstract class Character extends GameEntity {
 
     this.stats = config.data.stats;
     this.technique = config.data.technique;
+    this.domain = config.data.domain;
+    this.abilities = config.data.abilities || [];
 
     this.cursedEnergy = {
       max: this.stats.cursedEnergy || 100,
@@ -129,7 +133,10 @@ export abstract class Character extends GameEntity {
 
       // Let the group handle body creation — don't call physics.add.existing separately
       const hb = (this.scene as any).hitboxes.create(hbX, hbY, undefined) as Phaser.Physics.Arcade.Sprite;
-      hb.setVisible(false);
+      hb.setVisible((this.scene as any).debugMode);
+      if ((this.scene as any).debugMode) {
+        hb.setTint(0xff0000).setAlpha(0.6);
+      }
       hb.setDisplaySize(110, 70);
 
       const hbBody = hb.body as Phaser.Physics.Arcade.Body;
@@ -153,8 +160,8 @@ export abstract class Character extends GameEntity {
   }
 
   performSpecial() {
-    const cost = (FRAME_DATA as any).special.cost;
-    if (this.spendCE(cost) || this.team === 'unbound') {
+    const domainCost = this.domain?.cost || (FRAME_DATA as any).special.cost || 50;
+    if (this.spendCE(domainCost) || this.team === 'unbound') {
       this.isAttacking = true;
       const texture = this.sprite.texture.key;
       this.sprite.play(`${texture}_special`, true);

@@ -59,6 +59,8 @@ export interface UnifiedDomain {
   name: string;
   description: string;
   mechanic: string;
+  cost?: number; // Cursed energy cost
+  damage?: number; // Sure-hit damage per tick/burst
   image_url?: string;
   video_url?: string;
   scene_html?: string;
