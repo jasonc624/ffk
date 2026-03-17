@@ -1,10 +1,11 @@
 import Phaser from 'phaser';
 import { GameEntity, type Team } from './GameEntity';
-import type { CharacterData } from '../storage';
+import type { CharacterData } from '../types/character';
 import { RosterManager } from './RosterManager';
 import type { Domain } from '../domains/Domain';
 // import type { Summon } from './Summon'; // Removed to break circular dependency
-import { AbilityManager, type AbilityConfig } from './AbilityManager';
+import { AbilityManager } from './AbilityManager';
+import type { AbilityConfig } from '../types/ability';
 import { FRAME_DATA } from '../constants';
 
 export abstract class Character extends GameEntity {
@@ -41,7 +42,8 @@ export abstract class Character extends GameEntity {
       maxHp: 100,
       visualProfile: {
         ...config.data.technique.visualProfile,
-        videoUrl: config.data.domain.videoUrl,
+        domain: config.data.domain,
+        videoUrl: config.data.domain?.video_url,
         color: config.data.color
       }
     });

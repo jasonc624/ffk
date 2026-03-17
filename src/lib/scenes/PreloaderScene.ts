@@ -1,7 +1,10 @@
 import Phaser from 'phaser';
-import { getCharacter, type CharacterData } from '../storage';
+import { getCharacter } from '../storage';
+import type { CharacterData } from '../types/character';
 import { SUMMON_REGISTRY } from '../entities/registry';
 import { preloadTextures } from '../vfx/textureFactory';
+import { DomainSceneCapture } from '../vfx/DomainSceneCapture';
+import type { UnifiedDomain } from '../types/domain';
 
 export default class PreloaderScene extends Phaser.Scene {
   private characterData: CharacterData | null = null;
@@ -69,10 +72,27 @@ export default class PreloaderScene extends Phaser.Scene {
     this.load.audio('energy', '/assets/sounds/energy.mp3');
     this.load.audio('transition', '/assets/sounds/transition.mp3');
 
-    // Load Domain Video if available
-    if (this.characterData?.domain.videoUrl) {
-      console.log('Preloading domain video:', this.characterData.domain.videoUrl);
-      this.load.video('domain_bg_video', this.characterData.domain.videoUrl);
+    // Domain background handling
+    if (this.characterData) {
+      this.preloadDomainBackground(this.characterData);
+    }
+  }
+
+  async preloadDomainBackground(profile: any) {
+    const domain = profile.onDomainExpansion?.domain as UnifiedDomain | undefined;
+    
+    // Fallback if the profile structure is different (some characters have domain at top level)
+    const activeDomain = domain || profile.domain as UnifiedDomain | undefined;
+    
+    if (!activeDomain) return;
+
+    if (activeDomain.scene_html) {
+      console.log('[Preloader] Snapshotting HTML domain scene...');
+      // Snapshot the HTML scene to a texture before the game scene loads
+      await DomainSceneCapture.capture(this, activeDomain.scene_html, 'domain_bg_canvas');
+    } else if (activeDomain.video_url) {
+      console.log('[Preloader] Preloading domain video:', activeDomain.video_url);
+      this.load.video('domain_bg_video', activeDomain.video_url, true);
     }
   }
 

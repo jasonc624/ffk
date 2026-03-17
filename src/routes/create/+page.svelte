@@ -134,11 +134,16 @@
 
       if (!response.ok) throw new Error('Awakening failed');
       
-      const result = await response.json();
+      const { character, domain } = await response.json();
       clearInterval(interval);
 
-      const character: CharacterData = { ...result, name: sorcererName };
-      saveCharacter(character);
+      const finalCharacter: CharacterData = { 
+        ...character, 
+        name: sorcererName,
+        domain: domain // Merge domain back so storage.ts can handle splitting
+      };
+      
+      saveCharacter(finalCharacter);
       goto('/home');
     } catch (err) {
       console.error(err);

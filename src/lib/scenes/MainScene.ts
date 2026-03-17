@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
-import { getCharacter, type CharacterData } from '../storage';
+import { getCharacter } from '../storage';
+import type { CharacterData } from '../types/character';
 import { preloadTextures } from '../vfx/textureFactory';
 import { VisualEffectCompiler } from '../vfx/VisualEffectCompiler';
 import { BackgroundFactory } from '../vfx/backgroundFactory';
@@ -8,7 +9,8 @@ import { CPUCharacter } from '../entities/CPUCharacter';
 import { GameEntity } from '../entities/GameEntity';
 import { StandardDomain } from '../domains/StandardDomain';
 import { SUMMON_REGISTRY } from '../entities/registry';
-import { AbilityManager, type AbilityConfig } from '../entities/AbilityManager';
+import { AbilityManager } from '../entities/AbilityManager';
+import type { AbilityConfig } from '../types/ability';
 import { FRAME_DATA } from '$lib/constants';
 
 export default class MainScene extends Phaser.Scene {
