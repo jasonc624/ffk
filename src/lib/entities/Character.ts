@@ -97,41 +97,53 @@ export abstract class Character extends GameEntity {
   onDamageDealt(amount: number) {
     this.threatValue += amount;
   }
-
   performAttack(type: 'light' | 'heavy') {
-    if (this.isAttacking || this.isBlocking) return;
-    
-    // Attack debounce check
+    if (this.isAttacking || this.isBlocking || this.isHitstun) return;
+
     const now = this.scene.time.now;
     if (now - this.lastAttackTime < this.attackDebounce) return;
-    
+
     this.lastAttackTime = now;
     this.isAttacking = true;
-    
-    // Stop movement when attacking
+
     if (this.sprite.body) {
       (this.sprite.body as Phaser.Physics.Arcade.Body).setVelocityX(0);
     }
-    
+
     const data = FRAME_DATA[type];
     const texture = this.sprite.texture.key;
-    this.sprite.play(type === 'light' ? `${texture}_punch` : `${texture}_kick`, true);
+
+    const hurtAnim = type === 'light' ? `${texture}_punch` : `${texture}_kick`;
+    if (this.scene.anims.exists(hurtAnim)) {
+      this.sprite.play(hurtAnim, true);
+    }
 
     this.scene.time.delayedCall(data.startup * 16.6, () => {
+      if (!this.isAlive) return;
+
       const dir = this.sprite.flipX ? -1 : 1;
-      // Offset Y by +20 to align with the character's chest/hitbox height
-      const hb = this.scene.add.rectangle(this.sprite.x + (55 * dir), this.sprite.y + 20, 70, 45, 0xff0000, 0);
-      
-      this.scene.physics.add.existing(hb);
-      (hb.body as Phaser.Physics.Arcade.Body).setAllowGravity(false);
-      
-      (this.scene as any).hitboxes.add(hb);
+      const hbX = this.sprite.x + (55 * dir);
+      const hbY = this.sprite.y + 10;
+
+      // Let the group handle body creation — don't call physics.add.existing separately
+      const hb = (this.scene as any).hitboxes.create(hbX, hbY, undefined) as Phaser.Physics.Arcade.Sprite;
+      hb.setVisible(false);
+      hb.setDisplaySize(110, 70);
+
+      const hbBody = hb.body as Phaser.Physics.Arcade.Body;
+      hbBody.setAllowGravity(false);
+      hbBody.setImmovable(true);
+      hbBody.setSize(110, 70);
+
       (hb as any).owner = this;
-      (hb as any).damage = data.damage;
-      
+      (hb as any).damage = data.damage || 10;
+      (hb as any).archetype = 'PHYSICAL';
+      (hb as any).attackType = type;
+
       this.scene.time.delayedCall(data.active * 16.6, () => {
-        if (hb && hb.active) hb.destroy();
+        if (hb?.active) hb.destroy();
       });
+
       this.scene.time.delayedCall(data.recovery * 16.6, () => {
         this.isAttacking = false;
       });
@@ -152,13 +164,21 @@ export abstract class Character extends GameEntity {
   }
 
   onDamageReceived(amount: number, archetype: string, source: GameEntity) {
+    console.log('damage received')
     if (amount > 0 && this.sprite) {
       const texture = this.sprite.texture.key;
       this.sprite.play(`${texture}_hurt`, true);
 
-      // Hitstun: lock actions but don't force stop velocity (allow knockback)
+      // Visual feedback
+      this.sprite.setTint(0xff0000);
+      this.scene.time.delayedCall(150, () => {
+        if (this.sprite) this.sprite.clearTint();
+      });
+
+      // Reset state and apply hitstun
+      this.isAttacking = false;
       this.isHitstun = true;
-      this.scene.time.delayedCall(400, () => {
+      this.scene.time.delayedCall(600, () => {
         this.isHitstun = false;
       });
     }

@@ -9,6 +9,7 @@ import { GameEntity } from '../entities/GameEntity';
 import { StandardDomain } from '../domains/StandardDomain';
 import { SUMMON_REGISTRY } from '../entities/registry';
 import { AbilityManager, type AbilityConfig } from '../entities/AbilityManager';
+import { FRAME_DATA } from '$lib/constants';
 
 export default class MainScene extends Phaser.Scene {
   entities: GameEntity[] = [];
@@ -147,10 +148,17 @@ export default class MainScene extends Phaser.Scene {
     this.physics.add.collider(this.players.map(p => p.sprite), this.platforms);
     // Add player-to-player collision
     this.physics.add.collider(this.players[0].sprite, this.players[1].sprite);
-    
+
     // Overlap for attacks
-    this.players.forEach(player => {
-      this.physics.add.overlap(this.hitboxes, player.sprite, this.handleHitOverlap as any, undefined, this);
+    const playerSprites = this.players.map(p => p.sprite);
+    playerSprites.forEach(sprite => {
+      this.physics.add.overlap(
+        this.hitboxes,
+        sprite,
+        (hb, targetSprite) => this.handleHitOverlap(hb as any, targetSprite as Phaser.Physics.Arcade.Sprite),
+        undefined,
+        this
+      );
     });
 
     // Initial Systems
@@ -252,22 +260,42 @@ export default class MainScene extends Phaser.Scene {
     });
   }
 
-  handleHitOverlap(hb: any, targetSprite: Phaser.Physics.Arcade.Sprite) {
+  handleHitOverlap(objA: any, objB: any) {
+    // Phaser may swap arguments — find which is the hitbox and which is the target
+    const hb = objA.owner !== undefined ? objA
+      : objB.owner !== undefined ? objB
+        : null;
+
+    const targetSprite = objA.owner !== undefined ? objB : objA;
+
+    console.log('[OVERLAP DEBUG]', {
+      hbOwner: hb?.owner?.id,
+      hbDamage: hb?.damage,
+      targetSprite: !!targetSprite
+    });
+
+    if (!hb || !hb.owner) return;
+    if (!hb.hitTargets) hb.hitTargets = new Set();
+    if (hb.hitTargets.has(targetSprite)) return;
+    hb.hitTargets.add(targetSprite);
+
     const target = this.entities.find(e => e.sprite === targetSprite);
     const owner = hb.owner;
 
-    if (!target || !owner || target === owner) return;
+    if (!target || !owner) return;
+    if (target === owner) return;
+    if (target.team === owner.team) return;
 
-    target.receiveDamage(hb.damage || 5, 'PHYSICAL', owner);
+    const actualDamage = target.receiveDamage(hb.damage || 5, hb.archetype || 'PHYSICAL', owner);
 
-    const dir = owner.sprite.x < target.sprite.x ? 1 : -1;
-    if (target.sprite.body) {
+    if (actualDamage > 0) {
+      owner.onDamageDealt?.(actualDamage);
+      const dir = owner.sprite.x < target.sprite.x ? 1 : -1;
       const body = target.sprite.body as Phaser.Physics.Arcade.Body;
-      body.setVelocity(600 * dir, -300);
+      body?.setVelocity(400 * dir, -300);
+      console.log(`[Hit] ${owner.id} → ${target.id} | DMG: ${actualDamage} | HP: ${target.currentHp}`);
     }
-    hb.destroy();
   }
-
   getEntityById(id: string) {
     return this.entities.find(e => e.id === id);
   }
@@ -336,6 +364,7 @@ export default class MainScene extends Phaser.Scene {
     (burst.body as any).setAllowGravity(false);
     (burst as any).owner = sorcerer;
     (burst as any).damage = 25;
+    (burst as any).attackType = 'special';
     this.hitboxes.add(burst);
     this.tweens.add({ targets: burst, scale: 2, alpha: 0, duration: 300, onComplete: () => burst.destroy() });
   }
