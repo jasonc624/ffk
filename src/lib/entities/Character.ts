@@ -127,27 +127,33 @@ export abstract class Character extends GameEntity {
     this.scene.time.delayedCall(data.startup * 16.6, () => {
       if (!this.isAlive) return;
 
+      // dir: 1 = facing right, -1 = facing left
       const dir = this.sprite.flipX ? -1 : 1;
-      const hbX = this.sprite.x + (55 * dir);
-      const hbY = this.sprite.y + 10;
 
-      // Let the group handle body creation — don't call physics.add.existing separately
+      // Sprite physics body is 40px wide. Hitbox protrudes from the front edge.
+      // hbW: how far out the hit reaches. hbH: vertical coverage.
+      const hbW = type === 'light' ? 28 : 32; // punch slightly tighter than kick
+      const hbH = type === 'light' ? 26 : 30;
+      // spriteHalfW ≈ 20 (half of 40px body). Center hitbox just beyond that edge.
+      const spriteHalfW = 20;
+      const hbX = this.sprite.x + (spriteHalfW + hbW / 2) * dir;
+      // Punch hits mid-torso, kick hits lower
+      const hbY = this.sprite.y + (type === 'light' ? -5 : 12);
+
       const hb = (this.scene as any).hitboxes.create(hbX, hbY, undefined) as Phaser.Physics.Arcade.Sprite;
-      hb.setVisible((this.scene as any).debugMode);
-      if ((this.scene as any).debugMode) {
-        hb.setTint(0xff0000).setAlpha(0.6);
-      }
-      hb.setDisplaySize(110, 70);
+      hb.setVisible(false); // drawn via hitboxGraphics in MainScene
+      hb.setDisplaySize(hbW, hbH);
 
       const hbBody = hb.body as Phaser.Physics.Arcade.Body;
       hbBody.setAllowGravity(false);
       hbBody.setImmovable(true);
-      hbBody.setSize(110, 70);
+      hbBody.setSize(hbW, hbH);
 
       (hb as any).owner = this;
       (hb as any).damage = data.damage || 10;
       (hb as any).archetype = 'PHYSICAL';
       (hb as any).attackType = type;
+      (hb as any).facingDir = dir; // store facing direction for directional validation
 
       this.scene.time.delayedCall(data.active * 16.6, () => {
         if (hb?.active) hb.destroy();

@@ -26,7 +26,10 @@ export default class PreloaderScene extends Phaser.Scene {
   }
 
   init() {
-    this.characterData = getCharacter();
+    // Prefer character chosen in CharacterSelectScene (game registry).
+    // Fall back to localStorage for the existing character-creator flow.
+    const fromSelect = this.game.registry.get('selectedCharacter');
+    this.characterData = fromSelect ?? getCharacter();
   }
 
   preload() {

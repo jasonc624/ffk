@@ -32,6 +32,13 @@ export class CPUCharacter extends Character {
   update(time: number, delta: number) {
     super.update(time, delta);
     if (!this.isAlive) return;
+
+    // Sync hurtbox visibility with debug mode
+    if (this.hurtbox) {
+      const debugAlpha = (this.scene as any).debugMode ? 0.2 : 0;
+      (this.hurtbox as Phaser.GameObjects.Rectangle).setFillStyle(0xffffff, debugAlpha);
+    }
+
     this.runAI(delta);
   }
 

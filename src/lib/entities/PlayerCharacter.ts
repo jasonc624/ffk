@@ -1,11 +1,13 @@
 import Phaser from 'phaser';
 import { Character } from './Character';
 import type { CharacterData } from '../storage';
+import { AbilityExecutor } from './AbilityExecutor';
 
 export class PlayerCharacter extends Character {
   controls: any;
   canDoubleJump: boolean = true;
   isUsingCE: boolean = false;
+  abilityExecutor!: AbilityExecutor;
   private lastEnergySoundTime: number = 0;
 
   constructor(scene: Phaser.Scene, config: { 
@@ -32,12 +34,20 @@ export class PlayerCharacter extends Character {
     this.hurtbox = this.scene.add.rectangle(x, y, 40, 80, 0xffffff, debugAlpha);
     this.scene.physics.add.existing(this.hurtbox);
     (this.hurtbox.body as Phaser.Physics.Arcade.Body).setAllowGravity(false);
+
+    this.abilityExecutor = new AbilityExecutor(this);
   }
 
   update(time: number, delta: number) {
     super.update(time, delta);
     if (!this.isAlive) return;
     this.handleInput();
+
+    // Sync hurtbox visibility with debug mode
+    if (this.hurtbox) {
+      const debugAlpha = (this.scene as any).debugMode ? 0.2 : 0;
+      (this.hurtbox as Phaser.GameObjects.Rectangle).setFillStyle(0xffffff, debugAlpha);
+    }
   }
 
   handleInput() {
@@ -72,11 +82,11 @@ export class PlayerCharacter extends Character {
 
     // Fast Fall / Block
     if (this.controls.down.isDown) {
-      if (!onGround) this.sprite.body.setVelocityY(800);
+      if (!onGround) (this.sprite.body as Phaser.Physics.Arcade.Body).setVelocityY(800);
       else {
         this.isBlocking = true;
         this.sprite.setAlpha(0.6);
-        this.sprite.body.setVelocityX(0);
+        (this.sprite.body as Phaser.Physics.Arcade.Body).setVelocityX(0);
       }
     } else {
       this.isBlocking = false;
@@ -90,25 +100,25 @@ export class PlayerCharacter extends Character {
     if (Phaser.Input.Keyboard.JustDown(this.controls.light)) this.performAttack('light');
     if (Phaser.Input.Keyboard.JustDown(this.controls.heavy)) this.performAttack('heavy');
     
-    // Ability 1 (Special)
+    // Ability 1
     if (Phaser.Input.Keyboard.JustDown(this.controls.special)) {
-        if (this.abilityManager?.activate('Ability1')) {
-            this.performSpecial();
-        }
+      if (this.abilityManager?.activate('Ability1')) {
+        this.abilityExecutor.execute('Ability1');
+      }
     }
 
     // Ability 2
     if (this.controls.ability2 && Phaser.Input.Keyboard.JustDown(this.controls.ability2)) {
-        if (this.abilityManager?.activate('Ability2')) {
-            this.performAbility2();
-        }
+      if (this.abilityManager?.activate('Ability2')) {
+        this.abilityExecutor.execute('Ability2');
+      }
     }
 
     // Ability 3
     if (this.controls.ability3 && Phaser.Input.Keyboard.JustDown(this.controls.ability3)) {
-        if (this.abilityManager?.activate('Ability3')) {
-            this.performAbility3();
-        }
+      if (this.abilityManager?.activate('Ability3')) {
+        this.abilityExecutor.execute('Ability3');
+      }
     }
 
     if (Phaser.Input.Keyboard.JustDown(this.controls.domain)) {
@@ -144,7 +154,7 @@ export class PlayerCharacter extends Character {
   updateAnimation(onGround: boolean) {
     const texture = this.sprite.texture.key;
     if (!onGround) {
-      if (this.sprite.body.velocity.y > 0) this.sprite.play(`${texture}_descend`, true);
+      if ((this.sprite.body as Phaser.Physics.Arcade.Body).velocity.y > 0) this.sprite.play(`${texture}_descend`, true);
       else this.sprite.play(`${texture}_jump`, true);
     } else if ((this.sprite.body as Phaser.Physics.Arcade.Body).velocity.x !== 0) {
       this.sprite.play(`${texture}_walk`, true);
@@ -153,23 +163,7 @@ export class PlayerCharacter extends Character {
     }
   }
 
-  performAbility2() {
-      this.isAttacking = true;
-      const texture = this.sprite.texture.key;
-      this.sprite.play(`${texture}_special`, true); // Placeholder anim
-      this.scene.time.delayedCall(200, () => {
-          (this.scene as any).performBurst(this); // Placeholder effect
-          this.isAttacking = false;
-      });
-  }
-
-  performAbility3() {
-      this.isAttacking = true;
-      const texture = this.sprite.texture.key;
-      this.sprite.play(`${texture}_special`, true); // Placeholder anim
-      this.scene.time.delayedCall(200, () => {
-          (this.scene as any).performBurst(this); // Placeholder effect
-          this.isAttacking = false;
-      });
-  }
+  performAbility2() { /* delegated to JasonTechnique */ }
+  performAbility3() { /* delegated to JasonTechnique */ }
 }
+

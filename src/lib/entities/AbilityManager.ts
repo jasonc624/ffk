@@ -78,8 +78,12 @@ export class AbilityManager {
       (this.character as any).throatStrain += config.cost.throatStrain;
     }
 
-    if (config.selfDamage) {
-      this.character.receiveDamage(config.selfDamage, 'SELF', this.character);
+    if (config.cost.hp) {
+      this.character.receiveDamage(config.cost.hp, 'SELF', this.character);
+    }
+
+    if ((config as any).selfDamage) {
+      this.character.receiveDamage((config as any).selfDamage, 'SELF', this.character);
     }
 
     // Start cooldown immediately on activation

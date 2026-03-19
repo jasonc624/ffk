@@ -58,20 +58,17 @@ export default class HUDScene extends Phaser.Scene {
 
   drawAbilityBar(player: any) {
     const { width, height } = this.scale;
-    const centerY = height - 80;
-    const slotW = 60;
-    const spacing = 75;
-    
-    // Horizontal start
+    const slotW = 48;
+    const spacing = 58;
+    const startX = 20 + slotW / 2;          // 20px margin from left edge
+    const centerY = height - slotW / 2 - 20; // 20px margin from bottom edge
+
     const allAbilities = [
         { slot: 'Light', key: 'J', name: 'Light', cooldownFraction: 1, remainingCooldown: 0 },
         { slot: 'Heavy', key: 'K', name: 'Heavy', cooldownFraction: 1, remainingCooldown: 0 },
         ...player.abilities,
         { slot: 'Domain', key: 'Q', name: 'Domain', cooldownFraction: player.canExpandDomain ? 1 : 0, remainingCooldown: 0 }
     ];
-
-    const totalWidth = allAbilities.length * spacing;
-    const startX = (width - totalWidth) / 2 + spacing / 2;
 
     allAbilities.forEach((ability: any, i: number) => {
         const x = startX + i * spacing;
@@ -81,27 +78,30 @@ export default class HUDScene extends Phaser.Scene {
             const container = this.add.container(x, centerY);
             
             // BG Glass
-            const bg = this.add.rectangle(0, 0, slotW, slotW, 0x000000, 0.4)
-                .setStrokeStyle(2, 0xffffff, 0.1)
+            const bg = this.add.rectangle(0, 0, slotW, slotW, 0x000000, 0.5)
+                .setStrokeStyle(2, 0xffffff, 0.12)
                 .setDepth(10);
             
-            // Fill Cooldown
+            // Fill Cooldown (sweeps up from bottom)
             const fill = this.add.rectangle(0, slotW / 2, slotW, 0, 0xffffff, 0.15)
                 .setOrigin(0.5, 1)
                 .setDepth(11);
             
-            // Key Highlight
-            const keyBg = this.add.rectangle(0, -slotW/2 - 10, 24, 18, 0x000000, 0.8)
-                .setStrokeStyle(1, 0xffcc00, 0.5)
+            // Key badge (top-left corner of slot)
+            const keyBg = this.add.rectangle(0, -slotW / 2 - 8, 20, 15, 0x000000, 0.85)
+                .setStrokeStyle(1, 0xffcc00, 0.6)
                 .setDepth(15);
-            const keyTxt = this.add.text(0, -slotW/2 - 10, ability.key, { fontSize: '12px', color: '#ffcc00', fontFamily: 'Share Tech Mono' })
-                .setOrigin(0.5).setDepth(16);
+            const keyTxt = this.add.text(0, -slotW / 2 - 8, ability.key, {
+                fontSize: '10px', color: '#ffcc00', fontFamily: 'Share Tech Mono'
+            }).setOrigin(0.5).setDepth(16);
 
-            const nameTxt = this.add.text(0, slotW/2 + 10, ability.name.toUpperCase(), { fontSize: '9px', color: '#888888', letterSpacing: 1, fontFamily: 'Share Tech Mono' })
-                .setOrigin(0.5).setDepth(15);
+            const nameTxt = this.add.text(0, slotW / 2 + 6, ability.name.toUpperCase(), {
+                fontSize: '8px', color: '#666666', letterSpacing: 1, fontFamily: 'Share Tech Mono'
+            }).setOrigin(0.5).setDepth(15);
 
-            const cdTxt = this.add.text(0, 0, '', { fontSize: '22px', color: '#ffffff', fontStyle: 'bold', fontFamily: 'Share Tech Mono' })
-                .setOrigin(0.5).setDepth(20);
+            const cdTxt = this.add.text(0, 0, '', {
+                fontSize: '18px', color: '#ffffff', fontStyle: 'bold', fontFamily: 'Share Tech Mono'
+            }).setOrigin(0.5).setDepth(20);
 
             container.add([bg, fill, keyBg, keyTxt, nameTxt, cdTxt]);
             elements = { container, fill, cdTxt, bg };
@@ -113,7 +113,7 @@ export default class HUDScene extends Phaser.Scene {
         const isCooldown = ability.remainingCooldown > 0 || isDomainSlot;
         
         elements.fill.height = isCooldown ? slotW * (1 - ability.cooldownFraction) : 0;
-        elements.container.alpha = isCooldown ? 0.6 : 1;
+        elements.container.alpha = isCooldown ? 0.55 : 1;
         
         if (ability.remainingCooldown > 0) {
             elements.cdTxt.setText(Math.ceil(ability.remainingCooldown / 1000).toString());
@@ -123,9 +123,9 @@ export default class HUDScene extends Phaser.Scene {
             elements.cdTxt.setText('');
         }
 
-        // Border Pulse when ready
+        // Border: green when ready, subtle when on cooldown
         if (ability.remainingCooldown <= 0 && !isDomainSlot) {
-            elements.bg.setStrokeStyle(2, 0x10b981, 0.5);
+            elements.bg.setStrokeStyle(2, 0x10b981, 0.7);
         } else {
             elements.bg.setStrokeStyle(2, 0xffffff, 0.1);
         }

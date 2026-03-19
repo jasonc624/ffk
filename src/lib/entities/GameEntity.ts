@@ -13,6 +13,8 @@ export abstract class GameEntity {
   isAlive: boolean = true;
   statusEffects: Map<string, { duration: number; appliedAt: number }> = new Map();
   immunities: Set<string> = new Set();
+  /** Generic debuff stack counts — keyed by `${casterId}:${abilitySlot}` */
+  debuffStacks: Map<string, number> = new Map();
   visualProfile: any;
   scene: Phaser.Scene;
 

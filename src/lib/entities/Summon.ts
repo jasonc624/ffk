@@ -91,8 +91,10 @@ export abstract class Summon extends GameEntity {
       this.target = (this.scene as any).getOpponentOf((this.scene as any).getEntityById(this.summonerId));
       return;
     }
+    const body = this.sprite?.body as Phaser.Physics.Arcade.Body | null;
+    if (!body) return;
     const dir = this.target.sprite.x > this.sprite.x ? 1 : -1;
-    this.sprite.body.setVelocityX(200 * dir);
+    body.setVelocityX(200 * dir);
     this.sprite.setFlipX(dir === -1);
   }
 

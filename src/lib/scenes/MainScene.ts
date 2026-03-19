@@ -10,7 +10,6 @@ import { GameEntity } from '../entities/GameEntity';
 import { StandardDomain } from '../domains/StandardDomain';
 import { SUMMON_REGISTRY } from '../entities/registry';
 import { AbilityManager } from '../entities/AbilityManager';
-import type { AbilityConfig } from '../types/ability';
 import { FRAME_DATA } from '$lib/constants';
 
 export default class MainScene extends Phaser.Scene {
@@ -20,6 +19,7 @@ export default class MainScene extends Phaser.Scene {
   platforms!: Phaser.Physics.Arcade.StaticGroup;
   debugMode: boolean = false;
   debugGraphics?: Phaser.GameObjects.Graphics;
+  hitboxGraphics?: Phaser.GameObjects.Graphics;
 
   characterData: CharacterData | null = null;
   vfx!: VisualEffectCompiler;
@@ -31,7 +31,10 @@ export default class MainScene extends Phaser.Scene {
   }
 
   init() {
-    this.characterData = getCharacter();
+    // Prefer character chosen in CharacterSelectScene via game registry.
+    // Fall back to localStorage (character-creator flow).
+    const fromSelect = this.game.registry.get('selectedCharacter');
+    this.characterData = fromSelect ?? getCharacter();
     this.entities = [];
     this.players = [];
   }
@@ -89,25 +92,14 @@ export default class MainScene extends Phaser.Scene {
     });
     p1.spawn(200, height - 200);
 
-    // Debug toggle
+    // Debug toggle (T) — uses our custom Graphics overlay, not Phaser's internal renderer
     this.input.keyboard?.on('keydown-T', () => {
       this.debugMode = !this.debugMode;
-      this.physics.world.drawDebug = this.debugMode;
-      if (this.physics.world.debugGraphic) {
-        this.physics.world.debugGraphic.clear();
-        this.physics.world.debugGraphic.setVisible(this.debugMode);
-      }
       console.log(`[DEBUG] Debug mode ${this.debugMode ? 'ENABLED' : 'DISABLED'}`);
     });
 
-    // Default abilities for testing
-    const defaultAbilities: AbilityConfig[] = [
-      { slot: 'Ability1', name: 'Black Flash', key: 'L', cost: { cursedEnergy: 15 }, cooldown: 4000 },
-      { slot: 'Ability2', name: 'Cursed Speech', key: 'E', cost: { throatStrain: 30 }, cooldown: 8000 },
-      { slot: 'Ability3', name: 'Divergent Fist', key: 'F', cost: { cursedEnergy: 10 }, cooldown: 20000 }
-    ];
-
-    p1.abilityManager = new AbilityManager(p1, this.characterData?.abilities || defaultAbilities);
+    // Load abilities from selected character data
+    p1.abilityManager = new AbilityManager(p1, this.characterData?.abilities ?? []);
 
     p1.activeDomain = new StandardDomain(this, {
       id: 'p1_domain',
@@ -175,6 +167,9 @@ export default class MainScene extends Phaser.Scene {
         this
       );
     });
+
+    // Hitbox visualizer (always-on green overlay)
+    this.hitboxGraphics = this.add.graphics().setDepth(100);
 
     // Initial Systems
     this.vfx = new VisualEffectCompiler(this, this.scene.get('HUDScene'));
@@ -253,6 +248,46 @@ export default class MainScene extends Phaser.Scene {
   update(time: number, delta: number) {
     this.entities.forEach(e => e.update(time, delta));
 
+    // --- Always-on: draw active attack hitboxes as bright green outlines ---
+    if (this.hitboxGraphics) {
+      this.hitboxGraphics.clear();
+      if (this.hitboxes) {
+        this.hitboxes.getChildren().forEach((child: any) => {
+          const body = child?.body as Phaser.Physics.Arcade.Body | undefined;
+          if (body) {
+            this.hitboxGraphics!.fillStyle(0x00ff88, 0.15);
+            this.hitboxGraphics!.fillRect(body.x, body.y, body.width, body.height);
+            this.hitboxGraphics!.lineStyle(3, 0x00ff88, 1);
+            this.hitboxGraphics!.strokeRect(body.x, body.y, body.width, body.height);
+          }
+        });
+      }
+    }
+
+    // --- Debug-only: hurtboxes (cyan) + collision bodies (white) ---
+    if (this.debugMode) {
+      if (!this.debugGraphics) {
+        this.debugGraphics = this.add.graphics().setDepth(101);
+      }
+      this.debugGraphics.clear();
+      this.players?.forEach(p => {
+        if (p.hurtbox) {
+          const hbBody = (p.hurtbox as any).body as Phaser.Physics.Arcade.Body | undefined;
+          if (hbBody) {
+            this.debugGraphics!.lineStyle(2, 0x00ccff, 1);
+            this.debugGraphics!.strokeRect(hbBody.x, hbBody.y, hbBody.width, hbBody.height);
+          }
+        }
+        const pBody = p.sprite?.body as Phaser.Physics.Arcade.Body | undefined;
+        if (pBody) {
+          this.debugGraphics!.lineStyle(2, 0xffffff, 0.5);
+          this.debugGraphics!.strokeRect(pBody.x, pBody.y, pBody.width, pBody.height);
+        }
+      });
+    } else {
+      this.debugGraphics?.clear();
+    }
+
     // Sync HUD
     this.events.emit('updateHUD', {
       players: this.players.map(p => ({
@@ -283,12 +318,6 @@ export default class MainScene extends Phaser.Scene {
 
     const targetSprite = objA.owner !== undefined ? objB : objA;
 
-    console.log('[OVERLAP DEBUG]', {
-      hbOwner: hb?.owner?.id,
-      hbDamage: hb?.damage,
-      targetSprite: !!targetSprite
-    });
-
     if (!hb || !hb.owner) return;
     if (!hb.hitTargets) hb.hitTargets = new Set();
     if (hb.hitTargets.has(targetSprite)) return;
@@ -300,6 +329,19 @@ export default class MainScene extends Phaser.Scene {
     if (!target || !owner) return;
     if (target === owner) return;
     if (target.team === owner.team) return;
+
+    // --- Directional validation ---
+    // The hitbox stores the owner's facing direction at the moment of creation.
+    // Only land the hit if the target is in that direction relative to the owner.
+    if (hb.facingDir !== undefined) {
+      const toTarget = target.sprite.x - owner.sprite.x;
+      // facingDir: 1 = facing right, -1 = facing left
+      // If toTarget and facingDir have opposite signs the target is behind the owner
+      if (Math.sign(toTarget) !== hb.facingDir) {
+        console.log(`[HIT MISS] ${owner.id} attacked ${target.id} but target is behind them`);
+        return;
+      }
+    }
 
     const actualDamage = target.receiveDamage(hb.damage || 5, hb.archetype || 'PHYSICAL', owner);
 
