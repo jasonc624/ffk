@@ -28,9 +28,11 @@
 		"@ai-sdk/gateway": "^3.0.66",
 		"@ai-sdk/google": "^3.0.43",
 		"@ai-sdk/openai": "^3.0.41",
+		"@types/three": "^0.187.0",
 		"ai": "^6.0.116",
 		"html2canvas-pro": "^2.0.2",
 		"phaser": "^3.90.0",
+		"three": "^0.187.0",
 		"zod": "^4.3.6"
 	}
 }

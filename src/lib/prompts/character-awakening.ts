@@ -94,6 +94,9 @@ EXECUTION   → hpThreshold(0-0.5), onThresholdMet, onThresholdNotMet
 TETHER      → maxRange(${ABILITY_CONSTRAINTS.payload.range.min}-${ABILITY_CONSTRAINTS.payload.range.max}), tetherEffect({damageTransfer,pullForce,ceLeech,moveRestriction}), breakConditions
 COMMAND     → hearingRange(50-1000), penetration, inputOverride, throatStrainCost
 
+3D WEBGL VFX SIGNATURE (include inside every ability's payload as "vfx3d"):
+vfx3d       → { shape: "SPHERE" | "SPEAR" | "SLASH_ARC" | "VORTEX" | "PILLAR" | "METEOR" | "DOME" | "SINGULARITY" | "SONIC_CONE", primaryColor: "#HEX", secondaryColor: "#HEX" }
+
 STATUS EFFECTS:
 ${STATUS_EFFECTS.map(s => `${s.id}: ${s.description}`).join(', ')}
 `.trim()

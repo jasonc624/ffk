@@ -55,14 +55,23 @@ export class CharacterAwakeningService {
       },
       abilities: baseProfile.abilities.map(abilityLore => {
         const cal = calibration.abilities.find(a => a.slot === abilityLore.slot);
+        const payload = cal?.payload || {};
         return {
           ...abilityLore,
           cost: cal?.cost || { cursedEnergy: 0 },
           cooldown: cal?.cooldown || 5000,
           castTime: cal?.castTime || 0,
+          damage: payload.damage ?? 25,
+          archetype: payload.archetype ?? baseProfile.archetype,
           selfDamageOnUse: cal?.selfDamageOnUse,
-          payload: cal?.payload || {},
-          statusEffects: cal?.statusEffects || []
+          payload: {
+            ...payload,
+            vfx3d: payload.vfx3d ?? {
+              primaryColor: baseProfile.technique?.visualProfile?.casterColor || baseProfile.color,
+              secondaryColor: baseProfile.technique?.visualProfile?.accentColor || '#ffffff'
+            }
+          },
+          statusEffects: (cal?.statusEffects || []) as any
         };
       })
     };

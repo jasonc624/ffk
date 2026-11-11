@@ -188,7 +188,12 @@ export const CalibrationSchema = z.object({
             radius: z.number().min(ABILITY_CONSTRAINTS.payload.radius.min).max(ABILITY_CONSTRAINTS.payload.radius.max).optional(),
             duration: z.number().min(ABILITY_CONSTRAINTS.payload.duration.min).max(ABILITY_CONSTRAINTS.payload.duration.max).optional(),
             // Shared
-            archetype: z.string().optional()
+            archetype: z.string().optional(),
+            vfx3d: z.object({
+                shape: z.enum(['SPHERE', 'SPEAR', 'SLASH_ARC', 'VORTEX', 'PILLAR', 'METEOR', 'DOME', 'SINGULARITY', 'SONIC_CONE']).optional(),
+                primaryColor: z.string().optional(),
+                secondaryColor: z.string().optional()
+            }).optional()
         }).passthrough(), // Allow other fields from the prompt but validate keys we care about
         statusEffects: z.array(z.object({
             statusId: z.string(),

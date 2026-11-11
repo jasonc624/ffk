@@ -4,6 +4,7 @@ import type { CharacterData } from '../types/character';
 import { preloadTextures } from '../vfx/textureFactory';
 import { VisualEffectCompiler } from '../vfx/VisualEffectCompiler';
 import { BackgroundFactory } from '../vfx/backgroundFactory';
+import { ThreeArenaStage, type PlatformDef } from '../vfx/ThreeArenaStage';
 import { PlayerCharacter } from '../entities/PlayerCharacter';
 import { CPUCharacter } from '../entities/CPUCharacter';
 import { GameEntity } from '../entities/GameEntity';
@@ -24,6 +25,7 @@ export default class MainScene extends Phaser.Scene {
   characterData: CharacterData | null = null;
   vfx!: VisualEffectCompiler;
   bgFactory!: BackgroundFactory;
+  threeStage?: ThreeArenaStage;
   ceVignette?: Phaser.GameObjects.Graphics;
 
   constructor() {
@@ -46,17 +48,33 @@ export default class MainScene extends Phaser.Scene {
   create() {
     const { width, height } = this.scale;
 
-    // Background
-    const bg = this.add.image(width / 2, height / 2, 'shibuya_bg');
-    bg.setDisplaySize(width, height);
-    bg.setDepth(-10).setAlpha(0.7);
-
     // Play start transition sound
     this.sound.play('transition', { volume: 0.6 });
 
-    // Platforms
+    // Multi-tiered Arena Platforms (synced 1:1 with Three.js 3D stage)
     this.platforms = this.physics.add.staticGroup();
-    this.createPlatform(width / 2, height - 50, width, 40);
+    const platformDefs: PlatformDef[] = [
+      { x: width / 2, y: height - 50, w: width, h: 40, oneWay: false },
+      { x: 260, y: 495, w: 220, h: 20, oneWay: true },
+      { x: width - 260, y: 495, w: 220, h: 20, oneWay: true },
+      { x: width / 2, y: 355, w: 250, h: 20, oneWay: true }
+    ];
+    platformDefs.forEach(def => this.createPlatform(def.x, def.y, def.w, def.h, def.oneWay));
+
+    // Initialize 3D Three.js WebGL2 Arena Stage behind Phaser's transparent canvas
+    const parentEl = this.game.canvas.parentElement;
+    if (parentEl) {
+      this.threeStage?.destroy();
+      this.threeStage = new ThreeArenaStage(parentEl, platformDefs);
+    }
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.threeStage?.destroy();
+      this.threeStage = undefined;
+    });
+    this.events.once(Phaser.Scenes.Events.DESTROY, () => {
+      this.threeStage?.destroy();
+      this.threeStage = undefined;
+    });
 
     // Animations
     this.createAnimations('character');
@@ -237,16 +255,41 @@ export default class MainScene extends Phaser.Scene {
     });
   }
 
-  createPlatform(x: number, y: number, w: number, h: number) {
+  createPlatform(x: number, y: number, w: number, h: number, oneWay = false) {
     const p = this.platforms.create(x, y, 'shibuya_bg');
     p.setDisplaySize(w, h).setAlpha(0).refreshBody();
-    const g = this.add.graphics();
-    g.fillStyle(0xffffff, 0.05).fillRect(x - w / 2, y - h / 2, w, h);
-    g.lineStyle(2, 0xffffff, 0.1).strokeRect(x - w / 2, y - h / 2, w, h);
+    if (oneWay && p.body) {
+      const body = p.body as Phaser.Physics.Arcade.StaticBody;
+      body.checkCollision.down = false;
+      body.checkCollision.left = false;
+      body.checkCollision.right = false;
+    }
   }
 
   update(time: number, delta: number) {
     this.entities.forEach(e => e.update(time, delta));
+
+    // Sync 3D Three.js stage with live fighter positions, cursed energy auras, and attacks
+    if (this.threeStage && this.players) {
+      this.threeStage.syncAndRender(
+        this.players
+          .filter(p => p.sprite && p.sprite.active)
+          .map(p => {
+            const body = p.sprite.body as Phaser.Physics.Arcade.Body | undefined;
+            return {
+              id: p.id,
+              x: p.sprite.x,
+              y: p.sprite.y,
+              vx: body?.velocity.x ?? 0,
+              vy: body?.velocity.y ?? 0,
+              color: p.visualProfile?.color || '#38bdf8',
+              isUsingCE: Boolean((p as any).isUsingCE),
+              isAttacking: Boolean(p.isAttacking),
+              hp: p.currentHp
+            };
+          })
+      );
+    }
 
     // --- Always-on: draw active attack hitboxes as bright green outlines ---
     if (this.hitboxGraphics) {
@@ -350,6 +393,12 @@ export default class MainScene extends Phaser.Scene {
       const dir = owner.sprite.x < target.sprite.x ? 1 : -1;
       const body = target.sprite.body as Phaser.Physics.Arcade.Body;
       body?.setVelocity(400 * dir, -300);
+      this.threeStage?.triggerHitImpact(
+        target.sprite.x,
+        target.sprite.y,
+        actualDamage,
+        owner.visualProfile?.color || '#38bdf8'
+      );
       console.log(`[Hit] ${owner.id} → ${target.id} | DMG: ${actualDamage} | HP: ${target.currentHp}`);
     }
   }

@@ -17,6 +17,9 @@ export class BackgroundFactory {
     if (!domain) return;
     const { width, height } = this.scene.scale;
 
+    // Notify 3D Three.js stage to expand its 3D Domain barrier and shift lighting
+    (this.scene as any).threeStage?.activateDomain(profile, x, y);
+
     // Mask setup — unchanged
     const maskGraphics = this.scene.add.graphics().setDepth(-50);
     maskGraphics.fillStyle(0xffffff);
@@ -24,19 +27,21 @@ export class BackgroundFactory {
     const mask = maskGraphics.createGeometryMask();
     const transitionGroup = this.scene.add.group();
 
-    // Black base — unchanged
-    const blackBase = this.scene.add.rectangle(0, 0, width, height, 0x000000)
+    // Semi-transparent base so 3D Three.js Domain Barrier & floating ruins remain visible behind domain VFX
+    const has3DStage = Boolean((this.scene as any).threeStage);
+    const blackBase = this.scene.add.rectangle(0, 0, width, height, 0x000000, has3DStage ? 0.25 : 1.0)
       .setOrigin(0).setDepth(-6).setScrollFactor(0).setMask(mask);
     transitionGroup.add(blackBase);
 
     // ── BACKGROUND SELECTION ──
     if (domain?.scene_html && this.scene.textures.exists('domain_bg_canvas')) {
-      // Preloader already snapshotted it — use as static image
+      // Preloader already snapshotted it — blend with 3D stage if active
       const bg = this.scene.add.image(0, 0, 'domain_bg_canvas')
         .setOrigin(0)
         .setDepth(-5)
         .setScrollFactor(0)
         .setDisplaySize(width, height)
+        .setAlpha(has3DStage ? 0.55 : 1.0)
         .setMask(mask);
       transitionGroup.add(bg);
 
@@ -62,9 +67,9 @@ export class BackgroundFactory {
       transitionGroup.add(overlay);
 
     } else if (domain.background?.base) {
-      // Existing base color fallback — unchanged
+      // Existing base color fallback — semi-transparent when 3D stage is present
       const baseColor = parseInt(domain.background.base.replace('#', ''), 16);
-      const base = this.scene.add.rectangle(0, 0, width, height, baseColor)
+      const base = this.scene.add.rectangle(0, 0, width, height, baseColor, has3DStage ? 0.35 : 1.0)
         .setOrigin(0).setDepth(-5).setScrollFactor(0).setMask(mask);
       transitionGroup.add(base);
     }
@@ -284,7 +289,8 @@ export class BackgroundFactory {
     if (element) this.bgGroup.add(element);
   }
 
-  deactivate(onComplete: () => void) {
+  deactivate(onComplete?: () => void) {
+    (this.scene as any).threeStage?.deactivateDomain();
     this.scene.tweens.add({
       targets: Array.from(this.bgGroup.getChildren()),
       alpha: 0,

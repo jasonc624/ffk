@@ -66,6 +66,13 @@
 <style>
   :global(canvas) {
     display: block;
+    position: relative;
+    z-index: 10;
     image-rendering: pixelated;
+  }
+  :global(canvas.three-arena-canvas) {
+    position: absolute;
+    z-index: 0;
+    image-rendering: auto;
   }
 </style>
