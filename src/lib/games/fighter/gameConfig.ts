@@ -1,8 +1,8 @@
 import Phaser from 'phaser';
-import CharacterSelectScene from '$lib/scenes/CharacterSelectScene';
-import PreloaderScene from '$lib/scenes/PreloaderScene';
-import MainScene from '$lib/scenes/MainScene';
-import HUDScene from '$lib/scenes/HUDScene';
+import CharacterSelectScene from '$lib/games/fighter/scenes/CharacterSelectScene';
+import PreloaderScene from '$lib/games/fighter/scenes/PreloaderScene';
+import MainScene from '$lib/games/fighter/scenes/MainScene';
+import HUDScene from '$lib/games/fighter/scenes/HUDScene';
 
 export const getGameConfig = (containerId: string): Phaser.Types.Core.GameConfig => ({
   type: Phaser.AUTO,

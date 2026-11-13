@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getOptions, saveOptions, type Options } from '$lib/storage';
+  import { getOptions, saveOptions, type Options } from '$lib/games/fighter/storage';
 
   let options = $state<Options>(getOptions());
 

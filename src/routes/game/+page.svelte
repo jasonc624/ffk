@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getGameConfig } from '$lib/gameConfig';
+  import { getGameConfig } from '$lib/games/fighter/gameConfig';
 
   let game: Phaser.Game;
   let container: HTMLDivElement;

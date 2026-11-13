@@ -1,5 +1,5 @@
-import { AbilitiesSchema, TargetTypeEnum } from "$lib/abilities/schema"
-import { ABILITY_TYPES } from "$lib/abilities/types"
+import { AbilitiesSchema, TargetTypeEnum } from "$lib/games/fighter/abilities/schema"
+import { ABILITY_TYPES } from "$lib/games/fighter/abilities/types"
 import z from "zod"
 
 
@@ -155,7 +155,7 @@ export const BaseProfileSchema = z.object({
     }))
 })
 
-import { ABILITY_CONSTRAINTS } from "$lib/abilities/constraints"
+import { ABILITY_CONSTRAINTS } from "$lib/games/fighter/abilities/constraints"
 
 // ... (BASE PROFILE SCHEMA REMAINS THE SAME) ...
 

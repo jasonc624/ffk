@@ -1,4 +1,4 @@
-import type { DomainConfig, UnifiedDomain } from '$lib/types';
+import type { DomainConfig, UnifiedDomain } from '$lib/games/fighter/types';
 import Phaser from 'phaser';
 
 export class BackgroundFactory {

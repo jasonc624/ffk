@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getCharacter, clearAll, getGradeName, type CharacterData } from '$lib/storage';
+  import { getCharacter, clearAll, getGradeName, type CharacterData } from '$lib/games/fighter/storage';
 
   let character = $state<CharacterData | null>(null);
 
@@ -68,6 +68,12 @@
           Reset
         </button>
       </div>
+      <button 
+        onclick={() => goto('/')}
+        class="bg-emerald-500/10 border border-emerald-500/30 p-4 rounded-xl hover:bg-emerald-500/20 hover:border-emerald-400 transition-all font-['Share_Tech_Mono'] text-xs uppercase tracking-widest text-emerald-300"
+      >
+        Switch Game → 3D FPS / MOBA
+      </button>
     </div>
   </div>
 

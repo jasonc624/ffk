@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
-import { CharacterAwakeningService } from '$lib/services/ai/CharacterAwakeningService';
-import { DomainHtmlService } from '$lib/services/ai/DomainHtmlService';
+import { CharacterAwakeningService } from '$lib/games/fighter/services/ai/CharacterAwakeningService';
+import { DomainHtmlService } from '$lib/games/fighter/services/ai/DomainHtmlService';
 import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = async ({ request }) => {

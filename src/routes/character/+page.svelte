@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getCharacter, getGradeName, saveCharacter, type CharacterData } from '$lib/storage';
+  import { getCharacter, getGradeName, saveCharacter, type CharacterData } from '$lib/games/fighter/storage';
 
   let character = $state<CharacterData | null>(null);
   let isEditing = $state(false);

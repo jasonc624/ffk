@@ -7,7 +7,7 @@ import {
   buildBaseProfilePrompt, 
   buildCalibrationPrompt 
 } from '../../prompts/character-awakening';
-import { CharacterSchema, BaseProfileSchema, CalibrationSchema, type Character } from '$lib/character/types';
+import { CharacterSchema, BaseProfileSchema, CalibrationSchema, type Character } from '$lib/games/fighter/character/types';
 
 
 export class CharacterAwakeningService {

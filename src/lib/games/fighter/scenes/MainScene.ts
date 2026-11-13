@@ -11,7 +11,7 @@ import { GameEntity } from '../entities/GameEntity';
 import { StandardDomain } from '../domains/StandardDomain';
 import { SUMMON_REGISTRY } from '../entities/registry';
 import { AbilityManager } from '../entities/AbilityManager';
-import { FRAME_DATA } from '$lib/constants';
+import { FRAME_DATA } from '$lib/games/fighter/constants';
 
 export default class MainScene extends Phaser.Scene {
   entities: GameEntity[] = [];
