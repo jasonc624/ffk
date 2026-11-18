@@ -17,12 +17,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     accentColor: '#fde68a',
     maxHp: 450,
     maxMana: 100,
+    ceRegenMultiplier: 0.85,
     moveSpeed: 12.4,
     weapon: {
       name: "Judge's Gavel (Giant Mallet)",
       fireMode: 'MELEE_CLEAVE',
       viewModelType: 'HAMMER',
       damage: 65,
+      manaCost: 6,
       fireRateMs: 600,
       range: 6.5,
       cleaveArcDeg: 125,
@@ -35,14 +37,15 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       name: 'Non-Violence Pact Barrier [Hold Right Click]',
       kind: 'BARRIER_SHIELD',
       description:
-        'Hold Right Click to project a 1000 HP golden courtroom barrier ward that blocks incoming attacks and regenerates 125 HP/s when lowered.',
+        'Hold Right Click to project a 1000 HP golden courtroom barrier ward that blocks incoming attacks and drains Cursed Energy while held.',
+      manaDrainPerSec: 15,
       barrierMaxHp: 1000,
       barrierRegenPerSec: 125,
       color: '#fbbf24'
     },
     abilities: {
-      Q: {
-        key: 'Q',
+      SHIFT: {
+        key: 'SHIFT',
         name: 'Extended Gavel Rush',
         description:
           'Morph and extend the gavel shaft to surge down the lane, pinning enemies and triggering a Wall Verdict Slam on terrain impact.',
@@ -67,21 +70,8 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
         durationMs: 2200,
         color: '#fbbf24'
       },
-      F: {
-        key: 'F',
-        name: 'Confiscation (Guilty Verdict)',
-        description:
-          'Judgeman pronounces GUILTY: shocks nearby enemies, restores +200 Barrier HP, and grants +150 Overhealth Armor.',
-        cooldownMs: 11000,
-        manaCost: 25,
-        kind: 'OVERCHARGE',
-        damage: 40,
-        radius: 7.5,
-        durationMs: 5000,
-        color: '#fde047'
-      },
-      R: {
-        key: 'R',
+      Q: {
+        key: 'Q',
         name: "Deadly Sentencing: Executioner's Sword",
         description:
           'Slam the gavel to shatter the ground in an 18m cone (2.5s stun) and morph your weapon into the golden Executioner’s Sword for 6s!',
@@ -111,74 +101,79 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     accentColor: '#e0f2fe',
     maxHp: 280,
     maxMana: 140,
+    ceRegenMultiplier: 1.35,
     moveSpeed: 13.6,
     weapon: {
-      name: 'Lapse Blue Bolt',
-      fireMode: 'AUTO',
+      name: 'Reversal Red [Hold / Click M1]',
+      fireMode: 'BURST',
       viewModelType: 'RIFLE',
-      damage: 24,
-      fireRateMs: 150,
+      damage: 38,
+      maxDamage: 95,
+      manaCost: 14,
+      maxManaCost: 34,
+      fireRateMs: 420,
       range: 95,
-      magazineSize: 24,
-      reloadTimeMs: 1200,
-      projectileColor: '#38bdf8'
+      knockback: 6.5,
+      maxKnockback: 14.5,
+      chargeable: true,
+      maxChargeMs: 900,
+      isProjectileOrb: true,
+      magazineSize: 12,
+      reloadTimeMs: 1100,
+      projectileColor: '#f43f5e'
     },
     secondaryFire: {
-      name: 'Reversal Red Blast [Right Click]',
-      kind: 'HELIX_ROCKET',
-      description: 'Hurl a compressed Reversal Red singularity that detonates on impact for 85 AoE damage.',
-      maxDamage: 85,
-      cooldownMs: 5000,
-      color: '#f43f5e'
+      name: 'Lapse Blue [Right Click]',
+      kind: 'LAPSE_BLUE_ORB',
+      description:
+        '1st Right Click (28 CE): Launch a Lapse Blue singularity orb forward. 2nd Right Click (10 CE): Attract anyone within a 3m radius into the orb.',
+      manaCost: 28,
+      maxDamage: 65,
+      barrierMaxHp: 140,
+      barrierDrainPerSec: 30,
+      barrierRegenPerSec: 25,
+      cooldownMs: 7000,
+      color: '#0284c7'
     },
     abilities: {
-      Q: {
-        key: 'Q',
-        name: 'Limitless Warp',
-        description: 'Compress space to blink forward instantaneously, damaging enemies along your warp vector.',
+      SHIFT: {
+        key: 'SHIFT',
+        name: 'Limitless Teleport',
+        description:
+          'Hold SHIFT to pull the camera into third person and place a teleport marker on the ground (only you can see it). Release to begin an 800ms cast, then blink to the marked spot, damaging enemies on arrival.',
         cooldownMs: 4500,
-        manaCost: 20,
-        kind: 'BLINK_DASH',
+        manaCost: 22,
+        kind: 'LIMITLESS_TELEPORT',
         damage: 35,
         radius: 5.0,
-        durationMs: 350,
+        durationMs: 800,
         color: '#38bdf8'
       },
       E: {
         key: 'E',
-        name: 'Lapse: Maximum Blue',
-        description: 'Project an attractive spatial orb that pulls all nearby enemies inward before imploding.',
-        cooldownMs: 8000,
-        manaCost: 35,
-        kind: 'GRAVITY_ORB',
-        damage: 65,
-        radius: 8.0,
-        durationMs: 2400,
-        color: '#0284c7'
+        name: 'Infinity [Hold E]',
+        description:
+          'Hold E to project a forward-facing spatial distortion field that warps reality and blocks incoming attacks. Continuously consumes Cursed Energy (30/s) while held.',
+        cooldownMs: 1800,
+        manaCost: 0,
+        manaDrainPerSec: 30,
+        kind: 'INFINITY_SHIELD',
+        damage: 0,
+        radius: 3.0,
+        durationMs: 3200,
+        color: '#38bdf8'
       },
-      F: {
-        key: 'F',
-        name: 'Infinity Spatial Ward',
-        description: 'Expand Infinity outward to knock back threats, heal +55 HP, and gain +95 Overhealth.',
-        cooldownMs: 10000,
-        manaCost: 25,
-        kind: 'OVERCHARGE',
-        damage: 40,
-        radius: 7.0,
-        durationMs: 4000,
-        color: '#7dd3fc'
-      },
-      R: {
-        key: 'R',
+      Q: {
+        key: 'Q',
         name: 'Domain Expansion: Unlimited Void',
         description:
-          'Manifest Unlimited Void across an 19m sphere for 8s, paralyzing foes with infinite sensory overload.',
+          'Manifest an inescapable 19m barrier (1200 HP, only breakable from outside) that slows trapped enemies by 90% and unlocks [Q] Hollow Purple (Red + Blue fusion 1-hit kill that ends the Domain).',
         cooldownMs: 24000,
-        manaCost: 65,
+        manaCost: 75,
         kind: 'DOMAIN_ULT',
-        damage: 48,
+        damage: 25,
         radius: 19.0,
-        durationMs: 8000,
+        durationMs: 10000,
         color: '#38bdf8'
       }
     }
@@ -199,12 +194,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     accentColor: '#fca5a5',
     maxHp: 340,
     maxMana: 100,
+    ceRegenMultiplier: 0.95,
     moveSpeed: 14.2,
     weapon: {
       name: 'Knuckle Hand Cannon',
       fireMode: 'HAND_CANNON',
       viewModelType: 'DOOM_GAUNTLET',
       damage: 11,
+      manaCost: 5,
       pellets: 6,
       spread: 0.045,
       fireRateMs: 320,
@@ -218,6 +215,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       name: 'Rocket Punch [Hold & Release Right Click]',
       kind: 'CHARGED_PUNCH',
       description: 'Hold Right Click to charge your Gauntlet, then release to lunge forward and punch enemies back. Enemies slammed into walls take +65 bonus Wall-Slam damage!',
+      manaCost: 22,
       minDamage: 45,
       maxDamage: 95,
       wallSlamBonusDamage: 65,
@@ -226,8 +224,8 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       color: '#ef4444'
     },
     abilities: {
-      Q: {
-        key: 'Q',
+      SHIFT: {
+        key: 'SHIFT',
         name: 'Seismic Slam',
         description: 'Leap forward in a 3D arc and smash the ground, pulling and damaging enemies in a frontal shockwave cone.',
         cooldownMs: 5500,
@@ -250,20 +248,8 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
         durationMs: 600,
         color: '#fb7185'
       },
-      F: {
-        key: 'F',
-        name: 'Power Block',
-        description: 'Raise your Gauntlet to gain +90 Shield and instantly EMPOWER your next Rocket Punch (+50% damage & knockback).',
-        cooldownMs: 8000,
-        manaCost: 20,
-        kind: 'POWER_BLOCK',
-        damage: 0,
-        radius: 4.0,
-        durationMs: 3500,
-        color: '#dc2626'
-      },
-      R: {
-        key: 'R',
+      Q: {
+        key: 'Q',
         name: 'Meteor Strike',
         description: 'Vault high into the air and crash down in a massive 3D shockwave crater, dealing heavy damage and generating full Overhealth.',
         cooldownMs: 22000,
@@ -292,12 +278,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     accentColor: '#fef08a',
     maxHp: 280,
     maxMana: 110,
+    ceRegenMultiplier: 1.15,
     moveSpeed: 13.4,
     weapon: {
       name: 'Rocket Flail',
       fireMode: 'MELEE_CLEAVE',
       viewModelType: 'FLAIL',
       damage: 40,
+      manaCost: 5,
       fireRateMs: 420,
       range: 6.0,
       cleaveArcDeg: 115,
@@ -310,13 +298,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       name: 'Riot Barrier [Hold Right Click]',
       kind: 'BARRIER_SHIELD',
       description: 'Hold Right Click to deploy a 450 HP personal energy shield. Press Left Click while shielding to perform Shield Bash!',
+      manaDrainPerSec: 14,
       barrierMaxHp: 450,
       barrierRegenPerSec: 85,
       color: '#facc15'
     },
     abilities: {
-      Q: {
-        key: 'Q',
+      SHIFT: {
+        key: 'SHIFT',
         name: 'Shield Bash',
         description: 'Dash forward behind your Riot Barrier, bashing through enemies and knocking them back.',
         cooldownMs: 4500,
@@ -339,20 +328,8 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
         durationMs: 400,
         color: '#eab308'
       },
-      F: {
-        key: 'F',
-        name: 'Repair Pack Surge',
-        description: 'Burst-heal yourself for +85 HP, grant +75 Overhealth Armor, and heal nearby allied minions.',
-        cooldownMs: 7500,
-        manaCost: 25,
-        kind: 'OVERCHARGE',
-        damage: 25,
-        radius: 8.0,
-        durationMs: 4000,
-        color: '#fde047'
-      },
-      R: {
-        key: 'R',
+      Q: {
+        key: 'Q',
         name: 'Rally!',
         description: 'Expand a golden 3D Valkyrie banner aura for 8s that grants continuous Overhealth regeneration, +30% speed, and shockwaves!',
         cooldownMs: 24000,
@@ -381,12 +358,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     accentColor: '#6ee7b7',
     maxHp: 220,
     maxMana: 120,
+    ceRegenMultiplier: 1.0,
     moveSpeed: 13.8,
     weapon: {
       name: 'Null Vector Pulse Rifle',
       fireMode: 'AUTO',
       viewModelType: 'RIFLE',
       damage: 18,
+      manaCost: 3,
       fireRateMs: 120,
       range: 95,
       magazineSize: 28,
@@ -397,13 +376,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       name: 'Helix Rail Shot [Right Click]',
       kind: 'HELIX_ROCKET',
       description: 'Fire a high-velocity rail burst that explodes on impact for 75 AoE damage.',
+      manaCost: 24,
       maxDamage: 75,
       cooldownMs: 5500,
       color: '#34d399'
     },
     abilities: {
-      Q: {
-        key: 'Q',
+      SHIFT: {
+        key: 'SHIFT',
         name: 'Phase Blink',
         description: 'Warp instantaneously in your look direction, leaving a 3D spatial rift.',
         cooldownMs: 4500,
@@ -426,20 +406,8 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
         durationMs: 2400,
         color: '#34d399'
       },
-      F: {
-        key: 'F',
-        name: 'Biotic Aegis Field',
-        description: 'Deploy a 3D hexagonal barrier wall in front of you that grants +60 shield and shocks enemies.',
-        cooldownMs: 10000,
-        manaCost: 30,
-        kind: 'BARRIER_WALL',
-        damage: 32,
-        radius: 6.0,
-        durationMs: 5000,
-        color: '#059669'
-      },
-      R: {
-        key: 'R',
+      Q: {
+        key: 'Q',
         name: 'Domain: Tactical Horizon',
         description: 'Expand a 3D Domain dome around you for 8s. Grants infinite ammo, +40% fire rate, and calls down sure-hit void lightning.',
         cooldownMs: 25000,
@@ -468,12 +436,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     accentColor: '#d8b4fe',
     maxHp: 210,
     maxMana: 140,
+    ceRegenMultiplier: 1.25,
     moveSpeed: 13.0,
     weapon: {
       name: 'Voidfire Launcher',
       fireMode: 'BURST',
       viewModelType: 'RIFLE',
       damage: 36,
+      manaCost: 6,
       fireRateMs: 280,
       range: 105,
       magazineSize: 16,
@@ -484,13 +454,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       name: 'Concussive Nova [Right Click]',
       kind: 'HELIX_ROCKET',
       description: 'Detonate a high-impact plasma burst at your crosshair target for 70 AoE damage.',
+      manaCost: 22,
       maxDamage: 70,
       cooldownMs: 5000,
       color: '#c084fc'
     },
     abilities: {
-      Q: {
-        key: 'Q',
+      SHIFT: {
+        key: 'SHIFT',
         name: 'Jump Jet Surge',
         description: 'Propels you skyward and forward, igniting enemies beneath you.',
         cooldownMs: 5000,
@@ -513,20 +484,8 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
         durationMs: 2500,
         color: '#c084fc'
       },
-      F: {
-        key: 'F',
-        name: 'Focusing Siphon Beam',
-        description: 'Tethers the target in front of you with a 3D beam, draining HP to heal yourself.',
-        cooldownMs: 9500,
-        manaCost: 30,
-        kind: 'SIPHON_BEAM',
-        damage: 52,
-        radius: 22.0,
-        durationMs: 2000,
-        color: '#9333ea'
-      },
-      R: {
-        key: 'R',
+      Q: {
+        key: 'Q',
         name: 'Domain: Shrine of Cinders',
         description: 'Manifest an infernal 3D Domain dome that rains continuous plasma pillars on all enemies inside.',
         cooldownMs: 26000,
@@ -536,6 +495,84 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
         radius: 19.0,
         durationMs: 8000,
         color: '#a855f7'
+      }
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 6. MR. BIOMASTER — Bio-Organic Mutagen Brawler
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    id: 'mr_biomaster',
+    name: 'Mr. Biomaster',
+    role: 'BRAWLER',
+    archetypeLabel: 'BIO-ORGANIC MUTAGEN BRAWLER',
+    epithet: 'Sovereign of Cellular Evolution',
+    passiveName: 'Cellular Regeneration',
+    passiveDesc: 'Landing abilities splices biomass to restore +25 Overhealth and +10 Bio-Energy.',
+    color: '#22c55e',
+    accentColor: '#86efac',
+    maxHp: 320,
+    maxMana: 120,
+    ceRegenMultiplier: 1.1,
+    moveSpeed: 13.6,
+    weapon: {
+      name: 'Bio-Plasmic Spore Cannon',
+      fireMode: 'AUTO',
+      viewModelType: 'RIFLE',
+      damage: 23,
+      manaCost: 4,
+      fireRateMs: 145,
+      range: 90,
+      magazineSize: 26,
+      reloadTimeMs: 1200,
+      projectileColor: '#22c55e'
+    },
+    secondaryFire: {
+      name: 'Mutagenic Surge [Right Click]',
+      kind: 'HELIX_ROCKET',
+      description: 'Launch an unstable bio-mutagenic orb that ruptures on impact for 82 AoE damage.',
+      manaCost: 24,
+      maxDamage: 82,
+      cooldownMs: 4800,
+      color: '#4ade80'
+    },
+    abilities: {
+      SHIFT: {
+        key: 'SHIFT',
+        name: 'Bio-Leap Thruster',
+        description: 'Catapult forward in a bio-boosted arc and slam down to rupture enemies in an 8m shockwave.',
+        cooldownMs: 5500,
+        manaCost: 20,
+        kind: 'SEISMIC_SLAM',
+        damage: 60,
+        radius: 8.0,
+        durationMs: 600,
+        color: '#22c55e'
+      },
+      E: {
+        key: 'E',
+        name: 'Cellular Tendril Pull',
+        description: 'Fire a gravity-warping bio-singularity that draws nearby foes inward before detonating.',
+        cooldownMs: 8000,
+        manaCost: 30,
+        kind: 'GRAVITY_ORB',
+        damage: 65,
+        radius: 8.0,
+        durationMs: 2400,
+        color: '#16a34a'
+      },
+      Q: {
+        key: 'Q',
+        name: 'Domain Expansion: Primordial Biosphere',
+        description: 'Manifest an overgrown mutagenic sphere for 8s that overwhelms and damages all foes inside.',
+        cooldownMs: 24000,
+        manaCost: 65,
+        kind: 'DOMAIN_ULT',
+        damage: 46,
+        radius: 19.0,
+        durationMs: 8000,
+        color: '#22c55e'
       }
     }
   }

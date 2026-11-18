@@ -7,14 +7,18 @@
     getMouseSensitivity,
     setMouseSensitivity
   } from '$lib/games/fps-moba/storage';
-  import type { FpsHudState, FpsAbilityKey } from '$lib/games/fps-moba/types';
+  import {
+    type FpsHudState,
+    type FpsAbilityKey,
+    CE_EXHAUSTION_LOCKOUT_SEC
+  } from '$lib/games/fps-moba/types';
 
   let container: HTMLDivElement;
   let engine: FpsMobaEngine | null = null;
   let hud = $state<FpsHudState | null>(null);
   let sensitivity = $state<number>(1.0);
 
-  const abilityKeys: FpsAbilityKey[] = ['Q', 'E', 'F', 'R'];
+  const abilityKeys: FpsAbilityKey[] = ['SHIFT', 'E', 'Q'];
 
   function startMatch() {
     engine?.destroy();
@@ -63,6 +67,20 @@
 <div bind:this={container} class="fixed inset-0 bg-black overflow-hidden select-none"></div>
 
 {#if hud}
+  <!-- Gojo Infinity Spatial Reality-Distortion Blur Lens Overlay -->
+  {#if hud.hero.id === 'gojo' && hud.isUsingSecondary}
+    <div
+      class="fixed inset-0 pointer-events-none z-10 transition-opacity duration-150"
+      style="
+        backdrop-filter: blur(7px) saturate(1.3) contrast(1.06);
+        -webkit-backdrop-filter: blur(7px) saturate(1.3) contrast(1.06);
+        mask-image: radial-gradient(ellipse 46% 52% at 50% 50%, rgba(0,0,0,0.95) 25%, rgba(0,0,0,0.45) 68%, transparent 95%);
+        -webkit-mask-image: radial-gradient(ellipse 46% 52% at 50% 50%, rgba(0,0,0,0.95) 25%, rgba(0,0,0,0.45) 68%, transparent 95%);
+        background: radial-gradient(ellipse 46% 52% at 50% 50%, rgba(125, 211, 252, 0.08), rgba(192, 132, 252, 0.05) 60%, transparent 92%);
+      "
+    ></div>
+  {/if}
+
   <!-- ── 1. CENTER CROSSHAIR, MELEE BRACKETS, BARRIER & ROCKET PUNCH METERS ── -->
   <div class="fixed inset-0 pointer-events-none flex items-center justify-center z-20">
     <div class="relative flex flex-col items-center justify-center">
@@ -96,6 +114,63 @@
         {/if}
       </div>
 
+      <!-- Gojo Reversal Red Charge Bar (Hold Left Click) -->
+      {#if hud.primaryChargeRatio > 0}
+        <div class="mt-8 w-36 bg-black/80 border border-rose-400/50 rounded-full p-1">
+          <div
+            class="h-2.5 rounded-full transition-all bg-rose-500"
+            style="width: {hud.primaryChargeRatio * 100}%;"
+          ></div>
+          <div class="text-center font-['Share_Tech_Mono'] text-[10px] font-bold text-rose-200 mt-0.5">
+            REVERSAL RED {Math.round(hud.primaryChargeRatio * 100)}%
+          </div>
+        </div>
+      {/if}
+
+      <!-- Gojo Limitless Teleport (hold SHIFT to aim, release to cast) -->
+      {#if hud.teleportPhase === 'AIMING'}
+        <div class="mt-8 px-3 py-0.5 rounded-full bg-sky-500/25 border border-sky-400 font-['Share_Tech_Mono'] text-[10px] font-bold text-sky-200 animate-pulse">
+          [RELEASE SHIFT] LIMITLESS TELEPORT
+        </div>
+      {:else if hud.teleportPhase === 'CASTING'}
+        <div class="mt-8 w-36 bg-black/80 border border-sky-400/60 rounded-full p-1">
+          <div
+            class="h-2.5 rounded-full bg-sky-300 shadow-[0_0_10px_rgba(125,211,252,0.8)]"
+            style="width: {(hud.teleportCastRatio ?? 0) * 100}%;"
+          ></div>
+          <div class="text-center font-['Share_Tech_Mono'] text-[10px] font-bold text-sky-200 mt-0.5">
+            TELEPORTING…
+          </div>
+        </div>
+      {/if}
+
+      <!-- Gojo Lapse Blue Charge Bar (Hold Right Click) -->
+      {#if (hud.blueChargeRatio ?? 0) > 0}
+        <div class="mt-8 w-36 bg-black/80 border border-sky-400/50 rounded-full p-1">
+          <div
+            class="h-2.5 rounded-full transition-all bg-sky-400 shadow-[0_0_10px_rgba(56,189,248,0.7)]"
+            style="width: {(hud.blueChargeRatio ?? 0) * 100}%;"
+          ></div>
+          <div class="text-center font-['Share_Tech_Mono'] text-[10px] font-bold text-sky-200 mt-0.5">
+            LAPSE BLUE {Math.round((hud.blueChargeRatio ?? 0) * 100)}%
+          </div>
+        </div>
+      {/if}
+
+      <!-- Gojo Active Lapse Blue 2nd-Stage Prompt -->
+      {#if hud.hasActiveBlueOrb}
+        <div class="mt-4 px-3 py-0.5 rounded-full bg-sky-500/25 border border-sky-400 font-['Share_Tech_Mono'] text-[10px] font-bold text-sky-200 animate-pulse">
+          [RIGHT CLICK] ACTIVATE LAPSE BLUE ATTRACTION (3m)
+        </div>
+      {/if}
+
+      <!-- Gojo Domain-Only Hollow Purple Prompt -->
+      {#if hud.canCastHollowPurple}
+        <div class="mt-4 px-3.5 py-1 rounded-full bg-purple-500/30 border border-purple-400 font-['Share_Tech_Mono'] text-[10px] font-bold text-purple-200 shadow-[0_0_20px_rgba(168,85,247,0.5)] animate-pulse">
+          [Q] HOLLOW PURPLE READY (RED + BLUE · 1-HIT KILL · ENDS DOMAIN)
+        </div>
+      {/if}
+
       <!-- Doomfist Rocket Punch Charge Bar (Hold Right Click) -->
       {#if hud.punchChargeRatio > 0}
         <div class="mt-8 w-36 bg-black/80 border border-white/25 rounded-full p-1">
@@ -109,11 +184,11 @@
         </div>
       {/if}
 
-      <!-- Reinhardt / Brigitte Active Barrier Shield Meter -->
-      {#if hud.isUsingSecondary && hud.barrierMaxHp > 0}
+      <!-- Reinhardt / Brigitte / Gojo Infinity Barrier Shield Meter -->
+      {#if (hud.isUsingSecondary || hud.barrierHp < hud.barrierMaxHp) && hud.barrierMaxHp > 0}
         <div class="mt-8 w-44 bg-slate-950/85 border border-sky-400/50 rounded-xl px-3 py-1.5">
           <div class="flex justify-between font-['Share_Tech_Mono'] text-[10px] text-sky-300 mb-1">
-            <span>BARRIER SHIELD</span>
+            <span>{hud.hero.id === 'gojo' ? 'INFINITY [HOLD E]' : hud.hero.secondaryFire.name.split('[')[0].trim().toUpperCase()}</span>
             <span>{hud.barrierHp} / {hud.barrierMaxHp}</span>
           </div>
           <div class="h-2 bg-slate-800 rounded-full overflow-hidden">
@@ -143,8 +218,8 @@
   <div class="fixed inset-0 pointer-events-none z-20 overflow-hidden">
     {#each hud.damagePopups as pop (pop.id)}
       <div
-        class="absolute -translate-x-1/2 -translate-y-1/2 font-['Share_Tech_Mono'] font-bold transition-all"
-        style="left: {pop.x}%; top: {pop.y}%; color: {pop.color}; font-size: {pop.isCrit ? '20px' : '15px'}; text-shadow: 0 2px 6px rgba(0,0,0,0.9);"
+        class="absolute -translate-x-1/2 -translate-y-1/2 font-['Share_Tech_Mono'] font-bold"
+        style="left: {pop.x}%; top: {pop.y}%; opacity: {pop.opacity ?? 1}; color: {pop.color}; font-size: {pop.isCrit ? '20px' : '15px'}; text-shadow: 0 2px 6px rgba(0,0,0,0.9);"
       >
         {pop.label ? `${pop.label} -${pop.amount}` : pop.isCrit ? `CRIT ${pop.amount}!` : pop.amount}
       </div>
@@ -246,17 +321,23 @@
 
   <!-- ── 6. ACTIVE DOMAIN EXPANSION BANNER ── -->
   {#if hud.activeDomainName}
-    <div class="fixed top-20 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+    <div class="fixed top-20 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex flex-col items-center gap-1.5">
       <div
         class="px-6 py-1.5 rounded-full font-['Cinzel_Decorative'] text-sm font-bold tracking-[0.25em] uppercase text-white border animate-pulse"
         style="background: {hud.hero.color}33; border-color: {hud.hero.color}; box-shadow: 0 0 25px {hud.hero.color}66;"
       >
         {hud.activeDomainName} ACTIVE
       </div>
+      {#if hud.domainBarrierHp !== undefined && hud.domainBarrierMaxHp}
+        <div class="bg-slate-950/85 border border-white/15 rounded-full px-4 py-1 flex items-center gap-3 font-['Share_Tech_Mono'] text-[10px] text-sky-200">
+          <span>BARRIER: {hud.domainBarrierHp} / {hud.domainBarrierMaxHp} HP</span>
+          <span class="text-purple-300">90% INTERIOR SLOW</span>
+        </div>
+      {/if}
     </div>
   {/if}
 
-  <!-- ── 7. BOTTOM HUD: HP/MANA, Q/E/F/R COOLDOWNS, AND AMMO ── -->
+  <!-- ── 7. BOTTOM HUD: HP/MANA, SHIFT/E/Q COOLDOWNS, AND AMMO ── -->
   <div class="fixed bottom-5 inset-x-6 z-30 flex flex-wrap items-end justify-between gap-4 pointer-events-none">
     <!-- Left: HP, Shield & Mana Bars -->
     <div class="w-72 bg-slate-950/85 border border-white/15 p-4 rounded-2xl backdrop-blur-md">
@@ -273,41 +354,69 @@
         ></div>
       </div>
 
-      <div class="flex items-center justify-between font-['Share_Tech_Mono'] text-[11px] mb-1 text-sky-300">
-        <span>CURSED ENERGY</span>
-        <span>{hud.mana} / {hud.maxMana}</span>
+      <div class="flex items-center justify-between font-['Share_Tech_Mono'] text-[11px] mb-1 {hud.manaExhaustedTimerSec > 0 ? 'text-rose-400' : 'text-sky-300'}">
+        <div class="flex items-center gap-1.5">
+          <span>CURSED ENERGY</span>
+          {#if hud.manaExhaustedTimerSec <= 0}
+            <span class="text-[10px] text-cyan-400/80">(+{hud.ceRegenPerSec}/s)</span>
+          {/if}
+        </div>
+        {#if hud.manaExhaustedTimerSec > 0}
+          <span class="px-1.5 py-0.5 rounded bg-rose-500/20 border border-rose-400/50 text-rose-300 font-bold animate-pulse">
+            BURNOUT · {hud.manaExhaustedTimerSec.toFixed(1)}s
+          </span>
+        {:else}
+          <span>{hud.mana} / {hud.maxMana}</span>
+        {/if}
       </div>
       <div class="h-2 bg-slate-800 rounded-full overflow-hidden">
-        <div
-          class="h-full bg-sky-400 transition-all"
-          style="width: {(hud.mana / hud.maxMana) * 100}%;"
-        ></div>
+        {#if hud.manaExhaustedTimerSec > 0}
+          <div
+            class="h-full bg-rose-500/80 animate-pulse transition-all"
+            style="width: {((CE_EXHAUSTION_LOCKOUT_SEC - hud.manaExhaustedTimerSec) / CE_EXHAUSTION_LOCKOUT_SEC) * 100}%;"
+          ></div>
+        {:else}
+          <div
+            class="h-full bg-sky-400 transition-all"
+            style="width: {(hud.mana / hud.maxMana) * 100}%;"
+          ></div>
+        {/if}
       </div>
     </div>
 
-    <!-- Center: Q / E / F / R Ability Bar -->
+    <!-- Center: SHIFT / E / Q Ability Bar -->
     <div class="flex items-center gap-3 bg-slate-950/85 border border-white/15 p-3 rounded-2xl backdrop-blur-md">
       {#each abilityKeys as key}
         {@const ab = hud.hero.abilities[key]}
         {@const cd = hud.cooldowns[key]}
-        {@const onCooldown = cd.remainingMs > 0}
-        {@const noMana = hud.mana < ab.manaCost}
+        {@const isPurpleOverride = key === 'Q' && Boolean(hud.canCastHollowPurple)}
+        {@const onCooldown = !isPurpleOverride && cd.remainingMs > 0}
+        {@const noMana =
+          hud.manaExhaustedTimerSec > 0 ||
+          hud.mana <= 0 ||
+          (!isPurpleOverride && hud.mana < ab.manaCost) ||
+          (isPurpleOverride && hud.mana < 35)}
+        {@const cardColor = isPurpleOverride ? '#a855f7' : ab.color}
         <div
-          class="relative w-20 h-20 rounded-xl border flex flex-col items-center justify-between p-2 overflow-hidden {onCooldown || noMana
+          class="relative w-22 h-20 rounded-xl border flex flex-col items-center justify-between p-2 overflow-hidden {onCooldown || noMana
             ? 'border-white/10 bg-slate-900/80 opacity-60'
             : 'border-white/30 bg-slate-900'}"
-          style={!onCooldown && !noMana ? `border-color: ${ab.color}; box-shadow: 0 0 15px ${ab.color}33;` : ''}
+          style={!onCooldown && !noMana ? `border-color: ${cardColor}; box-shadow: 0 0 15px ${cardColor}44;` : ''}
         >
           <div class="w-full flex justify-between font-['Share_Tech_Mono'] text-[10px]">
-            <span class="font-bold text-white">[{key}]</span>
-            <span class="text-sky-300">{ab.manaCost}</span>
+            <span class="font-bold {isPurpleOverride ? 'text-purple-300' : key === 'Q' ? 'text-amber-300' : 'text-white'}">[{key}]</span>
+            <span class="{noMana ? 'text-rose-400' : 'text-sky-300'}">{isPurpleOverride ? '35' : ab.manaDrainPerSec ? `${ab.manaDrainPerSec}/s` : ab.manaCost}</span>
           </div>
-          <div class="text-[11px] font-bold text-center text-white leading-tight line-clamp-2">
-            {ab.name}
+          <div class="text-[11px] font-bold text-center {isPurpleOverride ? 'text-purple-200' : 'text-white'} leading-tight line-clamp-2">
+            {isPurpleOverride ? 'Hollow Purple' : ab.name}
           </div>
           {#if onCooldown}
             <div class="absolute inset-0 bg-black/75 flex items-center justify-center font-['Share_Tech_Mono'] text-sm font-bold text-white">
               {(cd.remainingMs / 1000).toFixed(1)}s
+            </div>
+          {:else if hud.manaExhaustedTimerSec > 0}
+            <div class="absolute inset-0 bg-rose-950/75 flex items-center justify-center font-['Share_Tech_Mono'] text-[11px] font-bold text-rose-300">
+              {hud.manaExhaustedTimerSec.toFixed(1)}s
             </div>
           {/if}
         </div>
@@ -334,15 +443,17 @@
       <!-- Secondary Fire (Right Click / M2) Status -->
       <div class="mt-2 pt-2 border-t border-white/10 flex items-center justify-between text-[11px]">
         <span class="text-sky-300">[M2] {hud.hero.secondaryFire.name.split('[')[0]}</span>
-        {#if hud.barrierMaxHp > 0}
-          <span class="text-white font-bold">{hud.barrierHp} HP</span>
+        {#if hud.hasActiveBlueOrb}
+          <span class="text-sky-300 font-bold animate-pulse">ATTRACT [M2]</span>
         {:else if hud.secondaryCooldownMs > 0}
           <span class="text-rose-400 font-bold">{(hud.secondaryCooldownMs / 1000).toFixed(1)}s CD</span>
+        {:else if hud.hero.secondaryFire.kind === 'BARRIER_SHIELD' && hud.barrierMaxHp > 0}
+          <span class="text-white font-bold">{hud.barrierHp} / {hud.barrierMaxHp}</span>
         {:else}
           <span class="text-emerald-400 font-bold">READY</span>
         {/if}
       </div>
-      <div class="text-[10px] text-slate-500 mt-1">[V] QUICK MELEE · [ESC] MENU</div>
+      <div class="text-[10px] text-slate-500 mt-1">[R] RELOAD · [V] QUICK MELEE · [ESC] MENU</div>
     </div>
   </div>
 

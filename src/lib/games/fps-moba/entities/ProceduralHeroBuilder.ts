@@ -1,7 +1,10 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { FpsHeroDef, MobaTeam } from '../types';
+
+export type HeroAnimHint = 'idle' | 'dance' | 'walk' | 'run';
 
 export interface ProceduralHeroBuildResult {
   group: THREE.Group;
@@ -10,7 +13,7 @@ export interface ProceduralHeroBuildResult {
   hitMeshes: THREE.Object3D[];
   hpBarFill: THREE.Mesh;
   nameplateMesh: THREE.Mesh;
-  animate: (elapsed: number, isMoving: boolean, isStunned: boolean) => void;
+  animate: (elapsed: number, isMoving: boolean, isStunned: boolean, animHint?: HeroAnimHint) => void;
 }
 
 interface RiggedBoneRecord {
@@ -20,11 +23,33 @@ interface RiggedBoneRecord {
   bindWorldQuat: THREE.Quaternion;
 }
 
+interface BiomasterAnimController {
+  root: THREE.Group;
+  mixer: THREE.AnimationMixer;
+  actions: Record<HeroAnimHint, THREE.AnimationAction>;
+  activeKey: HeroAnimHint | null;
+  lastElapsed: number;
+}
+
+interface DualClipAnimController {
+  idleRoot: THREE.Group;
+  idleMixer: THREE.AnimationMixer;
+  idleAction: THREE.AnimationAction;
+  runRoot: THREE.Group;
+  runMixer: THREE.AnimationMixer;
+  runAction: THREE.AnimationAction;
+  activeState: 'idle' | 'run';
+  lastElapsed: number;
+}
+
 interface RiggedGojoHandle {
   root: THREE.Group;
   hitMeshes: THREE.Mesh[];
   bones: Map<string, RiggedBoneRecord>;
   mixer: THREE.AnimationMixer | null;
+  isTposeBind?: boolean;
+  biomasterAnim?: BiomasterAnimController;
+  dualClipAnim?: DualClipAnimController;
 }
 
 let cachedToonGradient: THREE.DataTexture | null = null;
@@ -56,6 +81,155 @@ function poseRigBone(
   _tmpCharQuat.setFromEuler(_tmpCharEuler);
   _tmpDeltaQuat.copy(rec.bindWorldQuat).invert().multiply(_tmpCharQuat).multiply(rec.bindWorldQuat);
   rec.bone.quaternion.copy(rec.restQuat).multiply(_tmpDeltaQuat);
+}
+
+/** Separates A-pose arm vertices from torso/pants cleft and collapses bridging triangles so arms never pull hips. */
+function sanitizeGojoSkinnedMesh(mesh: THREE.SkinnedMesh): void {
+  const geo = mesh.geometry;
+  const posAttr = geo.attributes.position as THREE.BufferAttribute | undefined;
+  const idxAttr = geo.attributes.skinIndex as THREE.BufferAttribute | undefined;
+  const wAttr = geo.attributes.skinWeight as THREE.BufferAttribute | undefined;
+  if (!posAttr || !idxAttr || !wAttr || !mesh.skeleton) return;
+
+  const boneIndexMap = new Map<string, number>();
+  mesh.skeleton.bones.forEach((b, idx) => boneIndexMap.set(b.name, idx));
+
+  const rArm = boneIndexMap.get('RightArm');
+  const rFore = boneIndexMap.get('RightForeArm');
+  const rHand = boneIndexMap.get('RightHand');
+  const lArm = boneIndexMap.get('LeftArm');
+  const lFore = boneIndexMap.get('LeftForeArm');
+  const lHand = boneIndexMap.get('LeftHand');
+  const hips = boneIndexMap.get('Hips') ?? 0;
+  const spine02 = boneIndexMap.get('Spine02') ?? hips;
+  const spine01 = boneIndexMap.get('Spine01') ?? spine02;
+  const rUpLeg = boneIndexMap.get('RightUpLeg') ?? hips;
+  const lUpLeg = boneIndexMap.get('LeftUpLeg') ?? hips;
+
+  if (
+    rArm === undefined ||
+    rFore === undefined ||
+    rHand === undefined ||
+    lArm === undefined ||
+    lFore === undefined ||
+    lHand === undefined
+  ) {
+    return;
+  }
+
+  const armBoneSet = new Set<number>([rArm, rFore, rHand, lArm, lFore, lHand]);
+  for (const shoulderName of ['LeftShoulder', 'RightShoulder']) {
+    const sIdx = boneIndexMap.get(shoulderName);
+    if (sIdx !== undefined) armBoneSet.add(sIdx);
+  }
+
+  let maxY = 0;
+  for (let i = 0; i < posAttr.count; i++) {
+    const y = posAttr.getY(i);
+    if (y > maxY) maxY = y;
+  }
+  const posScale = maxY > 10 ? 100 : 1;
+
+  const interpSep = (y: number): number => {
+    const ys = [0.79, 0.86, 0.95, 1.05, 1.13, 1.235];
+    const xs = [0.184, 0.176, 0.162, 0.142, 0.128, 0.122];
+    if (y <= ys[0]) return xs[0];
+    if (y >= ys[ys.length - 1]) return xs[xs.length - 1];
+    for (let k = 0; k < ys.length - 1; k++) {
+      if (y <= ys[k + 1]) {
+        const t = (y - ys[k]) / (ys[k + 1] - ys[k]);
+        return xs[k] + t * (xs[k + 1] - xs[k]);
+      }
+    }
+    return xs[xs.length - 1];
+  };
+
+  const count = posAttr.count;
+  const isArm = new Uint8Array(count);
+  const normY = new Float32Array(count);
+  const normX = new Float32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const x = posAttr.getX(i) / posScale;
+    const y = posAttr.getY(i) / posScale;
+    const z = posAttr.getZ(i) / posScale;
+    normX[i] = x;
+    normY[i] = y;
+
+    const inY = y >= 0.79 && y < 1.235;
+    const inZ = y < 0.92 ? z > 0.015 : z > -0.095;
+    const sep = interpSep(y);
+    const isRArm = inY && inZ && x < -sep;
+    const isLArm = inY && inZ && x > sep;
+
+    if (isRArm || isLArm) {
+      isArm[i] = 1;
+      const upJ = isRArm ? rArm : lArm;
+      const midJ = isRArm ? rFore : lFore;
+      const loJ = isRArm ? rHand : lHand;
+      if (y >= 1.13) {
+        const t = Math.max(0, Math.min(1, (y - 1.13) / (1.235 - 1.13)));
+        idxAttr.setXYZW(i, upJ, midJ, 0, 0);
+        wAttr.setXYZW(i, t, 1 - t, 0, 0);
+      } else {
+        const t = Math.max(0, Math.min(1, (y - 0.93) / (1.03 - 0.93)));
+        idxAttr.setXYZW(i, midJ, loJ, 0, 0);
+        wAttr.setXYZW(i, t, 1 - t, 0, 0);
+      }
+    } else if (y < 1.235) {
+      const j = [idxAttr.getX(i), idxAttr.getY(i), idxAttr.getZ(i), idxAttr.getW(i)];
+      const w = [wAttr.getX(i), wAttr.getY(i), wAttr.getZ(i), wAttr.getW(i)];
+      let sum = 0;
+      for (let k = 0; k < 4; k++) {
+        if (armBoneSet.has(j[k])) {
+          j[k] = 0;
+          w[k] = 0;
+        } else {
+          sum += w[k];
+        }
+      }
+      if (sum > 0.05) {
+        idxAttr.setXYZW(i, j[0], j[1], j[2], j[3]);
+        wAttr.setXYZW(i, w[0] / sum, w[1] / sum, w[2] / sum, w[3] / sum);
+      } else {
+        const fb =
+          y >= 1.15 ? spine01 : y >= 1.05 ? spine02 : y >= 0.95 ? hips : x < 0 ? rUpLeg : lUpLeg;
+        idxAttr.setXYZW(i, fb, 0, 0, 0);
+        wAttr.setXYZW(i, 1, 0, 0, 0);
+      }
+    }
+  }
+
+  const index = geo.index;
+  if (index) {
+    for (let t = 0; t + 2 < index.count; t += 3) {
+      const a = index.getX(t);
+      const b = index.getX(t + 1);
+      const c = index.getX(t + 2);
+      const s = isArm[a] + isArm[b] + isArm[c];
+      if (s === 1) {
+        if (isArm[a]) index.setX(t, b);
+        else if (isArm[b]) index.setX(t + 1, c);
+        else index.setX(t + 2, a);
+      } else if (s === 2) {
+        if (!isArm[a]) index.setX(t, b);
+        else if (!isArm[b]) index.setX(t + 1, c);
+        else index.setX(t + 2, a);
+      } else if (s >= 1) {
+        const highTorsoA = !isArm[a] && normY[a] >= 1.235 && Math.abs(normX[a]) < 0.122;
+        const highTorsoB = !isArm[b] && normY[b] >= 1.235 && Math.abs(normX[b]) < 0.122;
+        const highTorsoC = !isArm[c] && normY[c] >= 1.235 && Math.abs(normX[c]) < 0.122;
+        if (highTorsoA || highTorsoB || highTorsoC) {
+          index.setX(t + 1, a);
+          index.setX(t + 2, a);
+        }
+      }
+    }
+    index.needsUpdate = true;
+  }
+
+  idxAttr.needsUpdate = true;
+  wAttr.needsUpdate = true;
 }
 
 /** Loads and rigs the textured Gojo GLB (`/models/gojo_animated.glb`, falling back to FBX) with cel-shading. */
@@ -95,6 +269,10 @@ async function loadRiggedGojoFbx(unitUserData?: unknown): Promise<RiggedGojoHand
           restQuat: bone.quaternion.clone(),
           bindWorldQuat: bone.getWorldQuaternion(new THREE.Quaternion())
         });
+      }
+
+      if ((obj as THREE.SkinnedMesh).isSkinnedMesh) {
+        sanitizeGojoSkinnedMesh(obj as THREE.SkinnedMesh);
       }
 
       if ((obj as THREE.Mesh).isMesh || (obj as THREE.SkinnedMesh).isSkinnedMesh) {
@@ -148,7 +326,406 @@ async function loadRiggedGojoFbx(unitUserData?: unknown): Promise<RiggedGojoHand
   }
 }
 
-function getAnimeToonGradient(): THREE.DataTexture {
+/** Auto-rigs an unskinned 2.22m T-pose mesh (arms along ±X, facing +Z) with a 20-bone humanoid skeleton. */
+function rigTposeMeshToHumanoid(
+  mesh: THREE.Mesh,
+  root: THREE.Group,
+  toonGrad: THREE.DataTexture,
+  unitUserData?: unknown
+): { skinned: THREE.SkinnedMesh; bones: Map<string, RiggedBoneRecord> } {
+  const boneSpecs: Array<[string, string | null, [number, number, number]]> = [
+    ['Hips', null, [0, 1.18, 0]],
+    ['Spine02', 'Hips', [0, 1.32, 0]],
+    ['Spine01', 'Spine02', [0, 1.48, 0]],
+    ['Spine', 'Spine01', [0, 1.63, -0.015]],
+    ['neck', 'Spine', [0, 1.82, 0]],
+    ['Head', 'neck', [0, 1.95, 0.02]],
+    ['LeftShoulder', 'Spine', [0.14, 1.64, -0.04]],
+    ['LeftArm', 'LeftShoulder', [0.25, 1.64, -0.056]],
+    ['LeftForeArm', 'LeftArm', [0.52, 1.65, -0.095]],
+    ['LeftHand', 'LeftForeArm', [0.76, 1.66, -0.063]],
+    ['RightShoulder', 'Spine', [-0.14, 1.64, -0.04]],
+    ['RightArm', 'RightShoulder', [-0.25, 1.64, -0.056]],
+    ['RightForeArm', 'RightArm', [-0.52, 1.65, -0.095]],
+    ['RightHand', 'RightForeArm', [-0.76, 1.66, -0.063]],
+    ['LeftUpLeg', 'Hips', [0.145, 1.12, -0.005]],
+    ['LeftLeg', 'LeftUpLeg', [0.165, 0.62, -0.018]],
+    ['LeftFoot', 'LeftLeg', [0.21, 0.16, -0.065]],
+    ['RightUpLeg', 'Hips', [-0.145, 1.12, -0.005]],
+    ['RightLeg', 'RightUpLeg', [-0.165, 0.62, -0.018]],
+    ['RightFoot', 'RightLeg', [-0.21, 0.16, -0.065]]
+  ];
+
+  const boneList: THREE.Bone[] = [];
+  const boneMap = new Map<string, THREE.Bone>();
+  const worldPosMap = new Map<string, [number, number, number]>();
+  const indexMap = new Map<string, number>();
+
+  for (const [name, parentName, worldPos] of boneSpecs) {
+    const bone = new THREE.Bone();
+    bone.name = name;
+    worldPosMap.set(name, worldPos);
+    if (parentName && boneMap.has(parentName)) {
+      const parentPos = worldPosMap.get(parentName)!;
+      bone.position.set(
+        worldPos[0] - parentPos[0],
+        worldPos[1] - parentPos[1],
+        worldPos[2] - parentPos[2]
+      );
+      boneMap.get(parentName)!.add(bone);
+    } else {
+      bone.position.set(worldPos[0], worldPos[1], worldPos[2]);
+      root.add(bone);
+    }
+    indexMap.set(name, boneList.length);
+    boneList.push(bone);
+    boneMap.set(name, bone);
+  }
+
+  root.updateMatrixWorld(true);
+
+  const bones = new Map<string, RiggedBoneRecord>();
+  for (const bone of boneList) {
+    bones.set(bone.name, {
+      bone,
+      restPos: bone.position.clone(),
+      restQuat: bone.quaternion.clone(),
+      bindWorldQuat: bone.getWorldQuaternion(new THREE.Quaternion())
+    });
+  }
+
+  const geo = mesh.geometry.clone();
+  const posAttr = geo.attributes.position as THREE.BufferAttribute;
+  const count = posAttr.count;
+  const skinIndices = new Uint16Array(count * 4);
+  const skinWeights = new Float32Array(count * 4);
+
+  const bIdx = (name: string) => indexMap.get(name) ?? 0;
+  const setBlend = (v: number, j0: number, j1: number, w0: number) => {
+    const clampW0 = Math.max(0, Math.min(1, w0));
+    const base = v * 4;
+    skinIndices[base] = j0;
+    skinIndices[base + 1] = j1;
+    skinWeights[base] = clampW0;
+    skinWeights[base + 1] = 1 - clampW0;
+  };
+
+  for (let i = 0; i < count; i++) {
+    const x = posAttr.getX(i);
+    const y = posAttr.getY(i);
+    const ax = Math.abs(x);
+
+    if (y >= 1.40 && y <= 1.85 && ax > 0.22) {
+      const isLeft = x > 0;
+      const sh = bIdx(isLeft ? 'LeftShoulder' : 'RightShoulder');
+      const arm = bIdx(isLeft ? 'LeftArm' : 'RightArm');
+      const fore = bIdx(isLeft ? 'LeftForeArm' : 'RightForeArm');
+      const hand = bIdx(isLeft ? 'LeftHand' : 'RightHand');
+
+      if (ax < 0.30) {
+        setBlend(i, sh, arm, (0.30 - ax) / (0.30 - 0.22));
+      } else if (ax < 0.48) {
+        setBlend(i, arm, fore, 1.0);
+      } else if (ax < 0.56) {
+        setBlend(i, arm, fore, (0.56 - ax) / (0.56 - 0.48));
+      } else if (ax < 0.72) {
+        setBlend(i, fore, hand, 1.0);
+      } else if (ax < 0.80) {
+        setBlend(i, fore, hand, (0.80 - ax) / (0.80 - 0.72));
+      } else {
+        setBlend(i, hand, fore, 1.0);
+      }
+    } else if (y < 1.16) {
+      const isLeft = x >= 0;
+      const up = bIdx(isLeft ? 'LeftUpLeg' : 'RightUpLeg');
+      const leg = bIdx(isLeft ? 'LeftLeg' : 'RightLeg');
+      const foot = bIdx(isLeft ? 'LeftFoot' : 'RightFoot');
+      const hips = bIdx('Hips');
+
+      if (y > 1.08) {
+        setBlend(i, hips, up, (y - 1.08) / (1.16 - 1.08));
+      } else if (y > 0.67) {
+        setBlend(i, up, leg, 1.0);
+      } else if (y > 0.57) {
+        setBlend(i, up, leg, (y - 0.57) / (0.67 - 0.57));
+      } else if (y > 0.21) {
+        setBlend(i, leg, foot, 1.0);
+      } else if (y > 0.12) {
+        setBlend(i, leg, foot, (y - 0.12) / (0.21 - 0.12));
+      } else {
+        setBlend(i, foot, leg, 1.0);
+      }
+    } else {
+      const hips = bIdx('Hips');
+      const s02 = bIdx('Spine02');
+      const s01 = bIdx('Spine01');
+      const spine = bIdx('Spine');
+      const neck = bIdx('neck');
+      const head = bIdx('Head');
+
+      if (y >= 1.90) {
+        setBlend(i, head, neck, 1.0);
+      } else if (y >= 1.84) {
+        setBlend(i, head, neck, (y - 1.84) / (1.90 - 1.84));
+      } else if (y >= 1.74) {
+        setBlend(i, neck, spine, (y - 1.74) / (1.84 - 1.74));
+      } else if (y >= 1.56) {
+        setBlend(i, spine, s01, (y - 1.56) / (1.74 - 1.56));
+      } else if (y >= 1.40) {
+        setBlend(i, s01, s02, (y - 1.40) / (1.56 - 1.40));
+      } else {
+        setBlend(i, s02, hips, (y - 1.16) / (1.40 - 1.16));
+      }
+    }
+  }
+
+  geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+  geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+  geo.computeBoundingSphere();
+  if (geo.boundingSphere) {
+    geo.boundingSphere.radius *= 1.45;
+  }
+
+  const origMat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+  const map = origMat && 'map' in origMat ? ((origMat as THREE.MeshStandardMaterial).map ?? null) : null;
+  if (map) {
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.anisotropy = 4;
+    map.needsUpdate = true;
+  }
+
+  const toonMat = new THREE.MeshToonMaterial({
+    color: 0xffffff,
+    map,
+    gradientMap: toonGrad,
+    emissive: new THREE.Color(0xffffff),
+    emissiveMap: map,
+    emissiveIntensity: map ? 0.24 : 0
+  });
+
+  const skinned = new THREE.SkinnedMesh(geo, toonMat);
+  skinned.name = mesh.name;
+  skinned.castShadow = true;
+  skinned.receiveShadow = true;
+  skinned.frustumCulled = false;
+  if (unitUserData !== undefined) {
+    skinned.userData.unit = unitUserData;
+  }
+
+  const skeleton = new THREE.Skeleton(boneList);
+  skinned.bind(skeleton);
+
+  return { skinned, bones };
+}
+
+const cachedBiomasterClipGltfs = new Map<
+  string,
+  Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>
+>();
+
+export function loadCachedGlb(url: string): Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> {
+  let pending = cachedBiomasterClipGltfs.get(url);
+  if (!pending) {
+    pending = new GLTFLoader().loadAsync(url);
+    cachedBiomasterClipGltfs.set(url, pending);
+  }
+  return pending;
+}
+
+export function applyAnimeToonToScene(
+  sceneRoot: THREE.Object3D,
+  toonGrad: THREE.DataTexture,
+  sharedMap?: THREE.Texture | null
+): THREE.Texture | null {
+  let extractedMap: THREE.Texture | null = sharedMap ?? null;
+  sceneRoot.traverse((obj) => {
+    if ((obj as THREE.Mesh).isMesh) {
+      const m = obj as THREE.Mesh;
+      const origMat = Array.isArray(m.material) ? m.material[0] : m.material;
+      const rawMap =
+        sharedMap ??
+        (origMat && 'map' in origMat ? ((origMat as THREE.MeshStandardMaterial).map ?? null) : null);
+      if (rawMap) {
+        rawMap.colorSpace = THREE.SRGBColorSpace;
+        rawMap.anisotropy = 4;
+        if (!extractedMap) extractedMap = rawMap;
+      }
+      m.material = new THREE.MeshToonMaterial({
+        color: 0xffffff,
+        map: rawMap,
+        gradientMap: toonGrad,
+        emissive: new THREE.Color(0xffffff),
+        emissiveMap: rawMap,
+        emissiveIntensity: rawMap ? 0.24 : 0
+      });
+      m.castShadow = true;
+      m.receiveShadow = true;
+      m.frustumCulled = false;
+      m.raycast = () => {};
+    }
+  });
+  return extractedMap;
+}
+
+/** Loads Gojo's idle (`gojo_idle.glb`) and running (`gojo_running.glb`) rigs onto a shared handle. */
+async function loadRiggedGojoGlbs(unitUserData?: unknown): Promise<RiggedGojoHandle | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const [idleGltf, runGltf] = await Promise.all([
+      loadCachedGlb('/models/gojo_idle.glb'),
+      loadCachedGlb('/models/gojo_running.glb')
+    ]);
+    const idleClip = idleGltf.animations.find((c) => c.duration > 0.2);
+    const runClip = runGltf.animations.find((c) => c.duration > 0.2);
+    if (!idleClip || !runClip) {
+      return loadRiggedGojoFbx(unitUserData);
+    }
+
+    const toonGrad = getAnimeToonGradient();
+    const root = new THREE.Group();
+
+    const idleRoot = cloneSkeleton(idleGltf.scene) as THREE.Group;
+    idleRoot.scale.setScalar(2.22 / 1.7);
+    const sharedMap = applyAnimeToonToScene(idleRoot, toonGrad);
+
+    const runRoot = cloneSkeleton(runGltf.scene) as THREE.Group;
+    runRoot.scale.setScalar(2.22 / 1.7);
+    applyAnimeToonToScene(runRoot, toonGrad, sharedMap);
+    runRoot.visible = false;
+
+    const idleMixer = new THREE.AnimationMixer(idleRoot);
+    const idleAction = idleMixer.clipAction(idleClip);
+    idleAction.setLoop(THREE.LoopRepeat, Infinity);
+    idleAction.play();
+
+    const runMixer = new THREE.AnimationMixer(runRoot);
+    const runAction = runMixer.clipAction(runClip);
+    runAction.setLoop(THREE.LoopRepeat, Infinity);
+    runAction.play();
+
+    const hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
+    const bodyHit = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.38, 1.55, 8), hitboxMat);
+    bodyHit.position.y = 0.9;
+    const headHit = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 8), hitboxMat);
+    headHit.position.y = 1.98;
+    headHit.userData.isHead = true;
+    if (unitUserData !== undefined) {
+      bodyHit.userData.unit = unitUserData;
+      headHit.userData.unit = unitUserData;
+    }
+
+    root.add(idleRoot, runRoot, bodyHit, headHit);
+
+    return {
+      root,
+      hitMeshes: [bodyHit, headHit],
+      bones: new Map(),
+      mixer: null,
+      dualClipAnim: {
+        idleRoot,
+        idleMixer,
+        idleAction,
+        runRoot,
+        runMixer,
+        runAction,
+        activeState: 'idle',
+        lastElapsed: -1
+      }
+    };
+  } catch {
+    return loadRiggedGojoFbx(unitUserData);
+  }
+}
+
+/** Loads Mr. Biomaster's 24-bone rig once and binds idle, dance, walk, and running clips onto one mixer. */
+async function loadBiomasterAnimController(
+  toonGrad: THREE.DataTexture
+): Promise<BiomasterAnimController | null> {
+  try {
+    const [runGltf, idleGltf, danceGltf, walkGltf] = await Promise.all([
+      loadCachedGlb('/models/mr_biomaster_run.glb'),
+      loadCachedGlb('/models/mr_biomaster_idle.glb'),
+      loadCachedGlb('/models/mr_biomaster_dance.glb'),
+      loadCachedGlb('/models/mr_biomaster_walk.glb')
+    ]);
+
+    const runClip = runGltf.animations.find((c) => c.duration > 0.2);
+    const idleClip = idleGltf.animations.find((c) => c.duration > 0.2);
+    const danceClip = danceGltf.animations.find((c) => c.duration > 0.2);
+    const walkClip = walkGltf.animations.find((c) => c.duration > 0.2);
+    if (!runClip || !idleClip || !danceClip || !walkClip) return null;
+
+    const animRoot = cloneSkeleton(runGltf.scene) as THREE.Group;
+    // Armature node scale 0.01 -> 1.70m; scale to 2.22m hero height
+    animRoot.scale.setScalar(2.22 / 1.7);
+    applyAnimeToonToScene(animRoot, toonGrad);
+
+    const mixer = new THREE.AnimationMixer(animRoot);
+    const makeAction = (clip: THREE.AnimationClip) => {
+      const action = mixer.clipAction(clip);
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      return action;
+    };
+
+    const actions: Record<HeroAnimHint, THREE.AnimationAction> = {
+      idle: makeAction(idleClip),
+      dance: makeAction(danceClip),
+      walk: makeAction(walkClip),
+      run: makeAction(runClip)
+    };
+    actions.idle.play();
+
+    return {
+      root: animRoot,
+      mixer,
+      actions,
+      activeKey: 'idle',
+      lastElapsed: -1
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Loads and auto-rigs `/models/mr_biomaster.glb` with cel-shading for the FPS-MOBA arena. */
+async function loadRiggedBiomasterGlb(unitUserData?: unknown): Promise<RiggedGojoHandle | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const gltf = await new GLTFLoader().loadAsync('/models/mr_biomaster.glb');
+    const srcMeshes: THREE.Mesh[] = [];
+    gltf.scene.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        srcMeshes.push(obj as THREE.Mesh);
+      }
+    });
+    if (srcMeshes.length === 0) return null;
+
+    const root = new THREE.Group();
+    const toonGrad = getAnimeToonGradient();
+    const { skinned, bones } = rigTposeMeshToHumanoid(srcMeshes[0], root, toonGrad, unitUserData);
+    root.add(skinned);
+
+    const handle: RiggedGojoHandle = {
+      root,
+      hitMeshes: [skinned],
+      bones,
+      mixer: null,
+      isTposeBind: true
+    };
+
+    const biomasterAnim = await loadBiomasterAnimController(toonGrad);
+    if (biomasterAnim) {
+      root.add(biomasterAnim.root);
+      handle.biomasterAnim = biomasterAnim;
+    }
+
+    return handle;
+  } catch {
+    return null;
+  }
+}
+
+export function getAnimeToonGradient(): THREE.DataTexture {
   if (cachedToonGradient) return cachedToonGradient;
   // 4-step cel-shading ramp in RGBA format for guaranteed WebGL2 compatibility
   const tones = [88, 146, 212, 255];
@@ -648,13 +1225,12 @@ function addGojoFeatures(
   headGroup: THREE.Group,
   upperBodyGroup: THREE.Group,
   bodyMesh: THREE.Mesh,
-  leftArm: ReturnType<typeof buildArticulatedLimb>,
   rightArm: ReturnType<typeof buildArticulatedLimb>,
   hairMat: THREE.Material,
   coatMat: THREE.Material,
   outlineMat: THREE.Material,
   hitMeshes: THREE.Object3D[]
-): { redOrb: THREE.Group; blueOrb: THREE.Group } {
+): void {
   // 1. Tall Flared Jujutsu Uniform Funnel Collar (wrapping neck up past chin)
   const collarGeo = createEllipticalLathe(
     [
@@ -822,71 +1398,6 @@ function addGojoFeatures(
     addOutline(napeSpike, outlineMat, 1.07, 1.025, 1.07);
     headGroup.add(napeSpike);
   }
-
-  // 4. Swirling Limitless Vortex Orbs (Reversal Red in Viewer's Left Palm, Lapse Blue in Viewer's Right Palm)
-  const createSwirlingVortexOrb = (coreHex: number, innerCss: string, outerCss: string, ringHex: number) => {
-    const orbGroup = new THREE.Group();
-
-    const core = new THREE.Mesh(
-      new THREE.SphereGeometry(0.085, 24, 24),
-      new THREE.MeshBasicMaterial({ color: 0xffffff })
-    );
-    const innerGlow = new THREE.Mesh(
-      new THREE.SphereGeometry(0.145, 24, 24),
-      new THREE.MeshBasicMaterial({
-        color: coreHex,
-        transparent: true,
-        opacity: 0.65,
-        blending: THREE.AdditiveBlending
-      })
-    );
-
-    const vortexMat = new THREE.MeshBasicMaterial({
-      map: createSwirlingVortexTexture(innerCss, outerCss),
-      transparent: true,
-      opacity: 0.96,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending
-    });
-    const vortexDiscFront = new THREE.Mesh(new THREE.PlaneGeometry(0.58, 0.58), vortexMat);
-    vortexDiscFront.name = 'vortexDisc';
-    const vortexDiscTilt = new THREE.Mesh(new THREE.PlaneGeometry(0.52, 0.52), vortexMat);
-    vortexDiscTilt.rotation.y = Math.PI * 0.35;
-    vortexDiscTilt.name = 'vortexDiscTilt';
-
-    // 4 nested 3D twisted spiral energy ribbons
-    const ribbonGroup = new THREE.Group();
-    ribbonGroup.name = 'ribbons';
-    for (let r = 0; r < 4; r++) {
-      const arc = new THREE.Mesh(
-        new THREE.TorusGeometry(0.19 + (r % 2) * 0.045, 0.011, 8, 28, Math.PI * 1.25),
-        new THREE.MeshBasicMaterial({
-          color: r % 2 === 0 ? 0xffffff : ringHex,
-          transparent: true,
-          opacity: 0.85,
-          blending: THREE.AdditiveBlending
-        })
-      );
-      arc.rotation.set(r * 0.75, r * 1.15, r * 0.55);
-      ribbonGroup.add(arc);
-    }
-
-    orbGroup.add(core, innerGlow, vortexDiscFront, vortexDiscTilt, ribbonGroup);
-    return orbGroup;
-  };
-
-  // Remember: when facing +Z (toward viewer), -X (`leftArm`) is VIEWER'S LEFT = Reversal Red!
-  const redOrb = createSwirlingVortexOrb(0xff2a55, '#ff4d79', '#be123c', 0xfda4af);
-  redOrb.position.set(0, -0.36, 0.14);
-  leftArm.lowerPivot.add(redOrb);
-
-  // And +X (`rightArm`) is VIEWER'S RIGHT = Lapse Blue!
-  const blueOrb = createSwirlingVortexOrb(0x00d2ff, '#38bdf8', '#0284c7', 0xbae6fd);
-  blueOrb.position.set(0, -0.36, 0.14);
-  rightArm.lowerPivot.add(blueOrb);
-
-  return { redOrb, blueOrb };
 }
 
 function addHigurumaFeatures(
@@ -1034,7 +1545,8 @@ export function buildProceduralHeroModel(
     doom: 0x450a0a,
     brigid: 0x422006,
     vex: 0x0f172a,
-    kael: 0x3b0764
+    kael: 0x3b0764,
+    mr_biomaster: 0x14532d
   };
   const pantsColorMap: Record<string, number> = {
     gojo: 0x111827,
@@ -1042,7 +1554,8 @@ export function buildProceduralHeroModel(
     doom: 0x1c1917,
     brigid: 0x292524,
     vex: 0x1e293b,
-    kael: 0x1e1b4b
+    kael: 0x1e1b4b,
+    mr_biomaster: 0x052e16
   };
   const skinColorMap: Record<string, number> = {
     gojo: 0xffe0d0,
@@ -1050,7 +1563,8 @@ export function buildProceduralHeroModel(
     doom: 0x7c4a32,
     brigid: 0xfde2d0,
     vex: 0xf5d0ba,
-    kael: 0xe9d5ff
+    kael: 0xe9d5ff,
+    mr_biomaster: 0x4ade80
   };
 
   const jacketMat = createToonMaterial(jacketColorMap[hero.id] ?? 0x1e293b, primaryCol, 0.06);
@@ -1267,14 +1781,12 @@ export function buildProceduralHeroModel(
   hitMeshes.push(...rightLeg.meshes);
 
   // Hero-specific sculpted outfits, hair, eyes/visors, and signature weapons
-  let orbs: { redOrb: THREE.Group; blueOrb: THREE.Group } | null = null;
   let riggedGojo: RiggedGojoHandle | null = null;
   if (hero.id === 'gojo') {
-    orbs = addGojoFeatures(
+    addGojoFeatures(
       headGroup,
       upperBodyGroup,
       bodyMesh,
-      leftArm,
       rightArm,
       hairMat,
       jacketMat,
@@ -1282,7 +1794,7 @@ export function buildProceduralHeroModel(
       hitMeshes
     );
 
-    void loadRiggedGojoFbx().then((rig) => {
+    void loadRiggedGojoGlbs().then((rig) => {
       if (!rig) return;
       if (bodyMesh.userData.unit) {
         for (const m of rig.hitMeshes) {
@@ -1290,10 +1802,18 @@ export function buildProceduralHeroModel(
         }
       }
 
-      if (orbs) {
-        orbs.redOrb.scale.setScalar(0.68);
-        orbs.blueOrb.scale.setScalar(0.68);
-        group.add(orbs.redOrb, orbs.blueOrb);
+      hipsGroup.visible = false;
+      hitMeshes.splice(0, hitMeshes.length, ...rig.hitMeshes);
+      group.add(rig.root);
+      riggedGojo = rig;
+    });
+  } else if (hero.id === 'mr_biomaster') {
+    void loadRiggedBiomasterGlb().then((rig) => {
+      if (!rig) return;
+      if (bodyMesh.userData.unit) {
+        for (const m of rig.hitMeshes) {
+          m.userData.unit = bodyMesh.userData.unit;
+        }
       }
 
       hipsGroup.visible = false;
@@ -1374,8 +1894,83 @@ export function buildProceduralHeroModel(
   const nameplateMesh = createHeroNameplate(group, 2.95, bannerText, hero.color);
   const phaseOffset = hero.name.charCodeAt(0) * 0.7;
 
-  const animate = (elapsed: number, isMoving: boolean, isStunned: boolean) => {
+  const animate = (elapsed: number, isMoving: boolean, isStunned: boolean, animHint?: HeroAnimHint) => {
     const t = elapsed + phaseOffset;
+
+    if (riggedGojo?.dualClipAnim) {
+      const dual = riggedGojo.dualClipAnim;
+      const dt = dual.lastElapsed < 0 ? 0.016 : Math.max(0, Math.min(0.1, elapsed - dual.lastElapsed));
+      dual.lastElapsed = elapsed;
+
+      const wantRun = !isStunned && (animHint === 'run' || animHint === 'walk' || (!animHint && isMoving));
+      const desiredState: 'idle' | 'run' = wantRun ? 'run' : 'idle';
+      dual.idleRoot.visible = desiredState === 'idle';
+      dual.runRoot.visible = desiredState === 'run';
+
+      if (desiredState !== dual.activeState) {
+        if (desiredState === 'run') {
+          dual.runAction.reset();
+          dual.runAction.setEffectiveTimeScale(animHint === 'walk' ? 0.72 : 1.0);
+          dual.runAction.play();
+        } else {
+          dual.idleAction.reset();
+          dual.idleAction.setEffectiveTimeScale(1.0);
+          dual.idleAction.play();
+        }
+        dual.activeState = desiredState;
+      }
+
+      if (!isStunned) {
+        if (desiredState === 'run') {
+          dual.runAction.setEffectiveTimeScale(animHint === 'walk' ? 0.72 : 1.0);
+          dual.runMixer.update(dt);
+        } else {
+          dual.idleMixer.update(dt);
+        }
+      }
+      return;
+    }
+
+    if (riggedGojo?.biomasterAnim) {
+      const anim = riggedGojo.biomasterAnim;
+      const dt = anim.lastElapsed < 0 ? 0.016 : Math.max(0, Math.min(0.1, elapsed - anim.lastElapsed));
+      anim.lastElapsed = elapsed;
+
+      const showAnimRig = !isStunned;
+      anim.root.visible = showAnimRig;
+      for (const c of riggedGojo.root.children) {
+        if ((c as THREE.SkinnedMesh).isSkinnedMesh) c.visible = !showAnimRig;
+      }
+
+      if (showAnimRig) {
+        const desiredKey: HeroAnimHint =
+          animHint ??
+          (isMoving
+            ? (elapsed % 9.0) < 4.5
+              ? 'walk'
+              : 'run'
+            : (elapsed % 11.8) < 4.03
+              ? 'idle'
+              : 'dance');
+
+        if (desiredKey !== anim.activeKey) {
+          const prevAction = anim.activeKey ? anim.actions[anim.activeKey] : null;
+          const nextAction = anim.actions[desiredKey];
+          nextAction.enabled = true;
+          nextAction.reset();
+          nextAction.setEffectiveTimeScale(1);
+          nextAction.setEffectiveWeight(1);
+          nextAction.play();
+          if (prevAction && prevAction !== nextAction) {
+            prevAction.enabled = true;
+            nextAction.crossFadeFrom(prevAction, 0.25, false);
+          }
+          anim.activeKey = desiredKey;
+        }
+        anim.mixer.update(dt);
+        return;
+      }
+    }
 
     if (isStunned) {
       hipsGroup.position.y = 0.82;
@@ -1387,15 +1982,17 @@ export function buildProceduralHeroModel(
       leftLeg.pivot.rotation.x = -0.15;
       rightLeg.pivot.rotation.x = 0.15;
       if (riggedGojo) {
-        const { bones, root } = riggedGojo;
+        const { bones, root, isTposeBind } = riggedGojo;
+        const armDown = isTposeBind ? 1.18 : 0;
+        const foreBend = isTposeBind ? 0.45 : 0;
         resetRigBones(bones);
         poseRigBone(bones, 'Spine01', 0.26, 0, Math.sin(t * 9) * 0.12);
         poseRigBone(bones, 'Spine', 0.1, 0, 0);
         poseRigBone(bones, 'Head', 0.35, Math.sin(t * 7) * 0.1, 0);
-        poseRigBone(bones, 'LeftArm', -0.18, 0, 0.28);
-        poseRigBone(bones, 'LeftForeArm', -0.25, 0, 0);
-        poseRigBone(bones, 'RightArm', -0.18, 0, -0.28);
-        poseRigBone(bones, 'RightForeArm', -0.25, 0, 0);
+        poseRigBone(bones, 'LeftArm', -0.18, 0, 0.28 - armDown);
+        poseRigBone(bones, 'LeftForeArm', isTposeBind ? 0 : -0.25, -foreBend, 0);
+        poseRigBone(bones, 'RightArm', -0.18, 0, -0.28 + armDown);
+        poseRigBone(bones, 'RightForeArm', isTposeBind ? 0 : -0.25, foreBend, 0);
         poseRigBone(bones, 'LeftUpLeg', -0.15, 0, 0.04);
         poseRigBone(bones, 'LeftLeg', 0.28, 0, 0);
         poseRigBone(bones, 'RightUpLeg', 0.12, 0, -0.04);
@@ -1425,7 +2022,9 @@ export function buildProceduralHeroModel(
       rightArm.pivot.rotation.set(swing * 0.55 - 0.25, 0, 0.12);
 
       if (riggedGojo) {
-        const { bones, root } = riggedGojo;
+        const { bones, root, isTposeBind } = riggedGojo;
+        const armDown = isTposeBind ? 1.18 : 0;
+        const foreBend = isTposeBind ? 0.45 : 0;
         resetRigBones(bones);
         root.position.y = Math.abs(Math.cos(walkCycle)) * 0.038;
         poseRigBone(bones, 'Hips', 0.04, Math.sin(walkCycle) * 0.06, 0);
@@ -1437,10 +2036,22 @@ export function buildProceduralHeroModel(
         poseRigBone(bones, 'LeftLeg', Math.max(0, swing * 0.85), 0, 0);
         poseRigBone(bones, 'RightUpLeg', swing * 0.7, 0, -0.03);
         poseRigBone(bones, 'RightLeg', Math.max(0, -swing * 0.85), 0, 0);
-        poseRigBone(bones, 'LeftArm', swing * 0.55 - 0.18, 0, 0.14);
-        poseRigBone(bones, 'LeftForeArm', -0.45 + Math.max(0, -swing * 0.35), 0.1, 0);
-        poseRigBone(bones, 'RightArm', -swing * 0.55 - 0.18, 0, -0.14);
-        poseRigBone(bones, 'RightForeArm', -0.45 + Math.max(0, swing * 0.35), -0.1, 0);
+        poseRigBone(bones, 'LeftArm', swing * 0.55 - 0.18, 0, 0.14 - armDown);
+        poseRigBone(
+          bones,
+          'LeftForeArm',
+          isTposeBind ? 0 : -0.45 + Math.max(0, -swing * 0.35),
+          0.1 - foreBend,
+          0
+        );
+        poseRigBone(bones, 'RightArm', -swing * 0.55 - 0.18, 0, -0.14 + armDown);
+        poseRigBone(
+          bones,
+          'RightForeArm',
+          isTposeBind ? 0 : -0.45 + Math.max(0, swing * 0.35),
+          -0.1 + foreBend,
+          0
+        );
       }
     } else {
       const breath = Math.sin(t * 2.2);
@@ -1451,7 +2062,9 @@ export function buildProceduralHeroModel(
       headGroup.rotation.y = Math.sin(t * 0.85) * 0.07;
 
       if (riggedGojo) {
-        const { bones, root, mixer } = riggedGojo;
+        const { bones, root, mixer, isTposeBind } = riggedGojo;
+        const armDown = isTposeBind ? 1.18 : 0;
+        const foreBend = isTposeBind ? 0.45 : 0;
         root.position.y = 0;
         if (mixer) {
           mixer.setTime(elapsed);
@@ -1465,13 +2078,25 @@ export function buildProceduralHeroModel(
           poseRigBone(bones, 'LeftLeg', 0.08, 0, 0);
           poseRigBone(bones, 'RightUpLeg', 0.05, 0, -0.04);
           poseRigBone(bones, 'RightLeg', 0.08, 0, 0);
-          // Combat stance holding Reversal Red (right hand / viewer left) & Lapse Blue (left hand / viewer right)
-          poseRigBone(bones, 'LeftArm', -0.42 + breath * 0.05, 0, 0.34);
-          poseRigBone(bones, 'LeftForeArm', -0.78 - breath * 0.04, 0.28, 0.12);
-          poseRigBone(bones, 'LeftHand', -0.25, 0, -0.15);
-          poseRigBone(bones, 'RightArm', -0.42 - breath * 0.05, 0, -0.34);
-          poseRigBone(bones, 'RightForeArm', -0.78 + breath * 0.04, -0.28, -0.12);
-          poseRigBone(bones, 'RightHand', -0.25, 0, 0.15);
+          // Combat stance holding Reversal Red / Lapse Blue or lowered combat guard for T-pose rig
+          poseRigBone(bones, 'LeftArm', -0.42 + breath * 0.05, 0, 0.34 - armDown);
+          poseRigBone(
+            bones,
+            'LeftForeArm',
+            isTposeBind ? 0 : -0.78 - breath * 0.04,
+            (isTposeBind ? 0 : 0.28) - foreBend,
+            isTposeBind ? 0 : 0.12
+          );
+          poseRigBone(bones, 'LeftHand', isTposeBind ? 0 : -0.25, 0, isTposeBind ? 0 : -0.15);
+          poseRigBone(bones, 'RightArm', -0.42 - breath * 0.05, 0, -0.34 + armDown);
+          poseRigBone(
+            bones,
+            'RightForeArm',
+            isTposeBind ? 0 : -0.78 + breath * 0.04,
+            (isTposeBind ? 0 : -0.28) + foreBend,
+            isTposeBind ? 0 : -0.12
+          );
+          poseRigBone(bones, 'RightHand', isTposeBind ? 0 : -0.25, 0, isTposeBind ? 0 : 0.15);
         }
       }
 
@@ -1500,38 +2125,6 @@ export function buildProceduralHeroModel(
         rightArm.pivot.rotation.set(-0.38 - breath * 0.04, 0, 0.16);
         rightArm.lowerPivot.rotation.x = -0.35;
       }
-    }
-
-    if (orbs) {
-      if (riggedGojo) {
-        group.updateMatrixWorld(true);
-        const rightHand = riggedGojo.bones.get('RightHand');
-        if (rightHand) {
-          rightHand.bone.getWorldPosition(_tmpHandWorld);
-          group.worldToLocal(_tmpHandWorld);
-          orbs.redOrb.position.set(_tmpHandWorld.x, _tmpHandWorld.y + 0.1, _tmpHandWorld.z + 0.14);
-        }
-        const leftHand = riggedGojo.bones.get('LeftHand');
-        if (leftHand) {
-          leftHand.bone.getWorldPosition(_tmpHandWorld);
-          group.worldToLocal(_tmpHandWorld);
-          orbs.blueOrb.position.set(_tmpHandWorld.x, _tmpHandWorld.y + 0.1, _tmpHandWorld.z + 0.14);
-        }
-      }
-
-      const spinSwirl = (orb: THREE.Group, speed: number) => {
-        const disc = orb.getObjectByName('vortexDisc');
-        const tilt = orb.getObjectByName('vortexDiscTilt');
-        const ribbons = orb.getObjectByName('ribbons');
-        if (disc) disc.rotation.z = elapsed * speed;
-        if (tilt) tilt.rotation.z = -elapsed * speed * 0.85;
-        if (ribbons) {
-          ribbons.rotation.y = elapsed * speed * 0.9;
-          ribbons.rotation.x = elapsed * speed * 0.55;
-        }
-      };
-      spinSwirl(orbs.redOrb, 3.6);
-      spinSwirl(orbs.blueOrb, -4.1);
     }
   };
 

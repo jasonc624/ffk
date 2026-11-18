@@ -1,6 +1,17 @@
 import * as THREE from 'three';
+import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { FpsHeroDef } from '../types';
-import { getMahoganyWoodTexture } from './ProceduralHeroBuilder';
+import {
+  applyAnimeToonToScene,
+  getAnimeToonGradient,
+  getMahoganyWoodTexture,
+  loadCachedGlb
+} from './ProceduralHeroBuilder';
+import {
+  createCursedEnergyOrb,
+  createInfinityDistortionMaterial,
+  type CursedOrbController
+} from '../vfx/CursedShaderVfx';
 
 /**
  * FpsViewModel — Renders Overwatch-style First-Person 3D Weapons, Melee Hammers/Flails,
@@ -17,6 +28,12 @@ export class FpsViewModel {
   private coreMesh!: THREE.Mesh;
   private gavelHeadGroup?: THREE.Group;
   private executionerSwordGroup?: THREE.Group;
+  private gojoPovBones: Map<string, { bone: THREE.Bone; restQuat: THREE.Quaternion }> = new Map();
+  private gojoRedChargeOrb?: CursedOrbController;
+  private gojoBlueChargeOrb?: CursedOrbController;
+  private infinityDistortionMat?: THREE.ShaderMaterial;
+  private primaryChargeRatio = 0;
+  private blueChargeRatio = 0;
   private muzzleLight: THREE.PointLight;
 
   // Animation states
@@ -81,7 +98,9 @@ export class FpsViewModel {
     this.rightWeaponGroup.add(this.muzzleLight);
 
     const vmType = hero.weapon.viewModelType;
-    if (vmType === 'HAMMER') {
+    if (hero.id === 'gojo') {
+      this.buildGojoPovViewModel(darkMetalMat, glowMat);
+    } else if (vmType === 'HAMMER') {
       this.buildHammerViewModel(darkMetalMat, trimMat, glowMat, accentMat);
     } else if (vmType === 'FLAIL') {
       this.buildFlailViewModel(darkMetalMat, trimMat, glowMat, accentMat);
@@ -312,6 +331,99 @@ export class FpsViewModel {
     this.leftHandGroup.add(bracerMesh, leftOrb);
   }
 
+  private buildGojoPovViewModel(darkMat: THREE.Material, glowMat: THREE.Material) {
+    const bracerMesh = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.09, 0.34), darkMat);
+    bracerMesh.rotation.set(0.12, -0.18, 0);
+    const leftOrb = new THREE.Mesh(new THREE.IcosahedronGeometry(0.06, 1), glowMat);
+    leftOrb.position.set(0.04, 0.11, -0.14);
+    this.leftHandGroup.add(bracerMesh, leftOrb);
+
+    // Pre-create fallback charge orbs in case GLB load is pending or in fallback
+    const fallbackRedOrb = createCursedEnergyOrb({
+      variant: 'RED',
+      radius: 0.052,
+      withLight: false
+    });
+    fallbackRedOrb.group.position.set(0, 0.08, -0.22);
+    fallbackRedOrb.group.visible = false;
+    this.rightWeaponGroup.add(fallbackRedOrb.group);
+    this.gojoRedChargeOrb = fallbackRedOrb;
+
+    const fallbackBlueOrb = createCursedEnergyOrb({
+      variant: 'BLUE',
+      radius: 0.056,
+      withLight: false
+    });
+    fallbackBlueOrb.group.position.set(0, 0.08, -0.22);
+    fallbackBlueOrb.group.visible = false;
+    this.rightWeaponGroup.add(fallbackBlueOrb.group);
+    this.gojoBlueChargeOrb = fallbackBlueOrb;
+
+    if (typeof window === 'undefined') return;
+    void loadCachedGlb('/models/gojo_pov_finger.glb')
+      .then((gltf) => {
+        const handScene = cloneSkeleton(gltf.scene) as THREE.Group;
+        const toonGrad = getAnimeToonGradient();
+        applyAnimeToonToScene(handScene, toonGrad);
+        // Keep POV hand below the HDR bloom threshold so the hand/weapon stays crisp and never glows
+        handScene.traverse((obj) => {
+          if ((obj as THREE.Mesh).isMesh) {
+            const mat = (obj as THREE.Mesh).material as THREE.MeshToonMaterial;
+            if (mat && 'emissiveIntensity' in mat) {
+              mat.emissiveIntensity = 0;
+              mat.color.setHex(0xdbe2ec);
+            }
+          }
+        });
+
+        handScene.traverse((obj) => {
+          if ((obj as THREE.Bone).isBone) {
+            const bone = obj as THREE.Bone;
+            this.gojoPovBones.set(bone.name, {
+              bone,
+              restQuat: bone.quaternion.clone()
+            });
+          }
+        });
+
+        // gojo_pov_finger.glb forearm->index runs +X -> -X; yaw toward crosshair + 15° left with native +Y up so thumb stays below index
+        const holder = new THREE.Group();
+        holder.position.set(0.02, -0.22, 0.22);
+        holder.rotation.set(0.06, -Math.PI * 0.43 + THREE.MathUtils.degToRad(15), 0.04);
+        holder.scale.setScalar(0.82);
+        holder.add(handScene);
+        this.rightWeaponGroup.add(holder);
+
+        // Remove fallback orbs if we have a rigged index fingertip bone
+        const indexTip = this.gojoPovBones.get('Index3')?.bone;
+        if (indexTip) {
+          this.rightWeaponGroup.remove(fallbackRedOrb.group);
+          this.rightWeaponGroup.remove(fallbackBlueOrb.group);
+
+          const redOrbCtrl = createCursedEnergyOrb({
+            variant: 'RED',
+            radius: 0.052,
+            withLight: false
+          });
+          redOrbCtrl.group.visible = false;
+          redOrbCtrl.group.position.set(-0.04, 0.05, 0);
+          indexTip.add(redOrbCtrl.group);
+          this.gojoRedChargeOrb = redOrbCtrl;
+
+          const blueOrbCtrl = createCursedEnergyOrb({
+            variant: 'BLUE',
+            radius: 0.056,
+            withLight: false
+          });
+          blueOrbCtrl.group.visible = false;
+          blueOrbCtrl.group.position.set(-0.04, 0.05, 0);
+          indexTip.add(blueOrbCtrl.group);
+          this.gojoBlueChargeOrb = blueOrbCtrl;
+        }
+      })
+      .catch(() => {});
+  }
+
   private buildBarrierShieldOverlay() {
     const shieldCol = new THREE.Color(this.hero.secondaryFire.color || this.hero.color);
     const isWide = this.hero.id === 'higuruma' || this.hero.id === 'titan';
@@ -325,7 +437,6 @@ export class FpsViewModel {
       side: THREE.DoubleSide,
       depthWrite: false
     });
-    const plane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), this.barrierShieldMat);
 
     this.barrierBorderMat = new THREE.MeshBasicMaterial({
       color: shieldCol,
@@ -335,11 +446,24 @@ export class FpsViewModel {
       blending: THREE.AdditiveBlending,
       depthWrite: false
     });
-    const gridPlane = new THREE.Mesh(new THREE.PlaneGeometry(w, h, 8, 6), this.barrierBorderMat);
-    gridPlane.position.z = 0.01;
 
-    this.barrierShieldGroup.add(plane, gridPlane);
-    this.barrierShieldGroup.position.set(0, 0, -0.82);
+    if (this.hero.id === 'gojo') {
+      // Gojo Infinity: organic spatial distortion lens, 4m wide x 3m tall wall projected ahead of him
+      this.infinityDistortionMat = createInfinityDistortionMaterial();
+      const lensGeo = new THREE.PlaneGeometry(4, 3, 32, 24);
+      const lensMesh = new THREE.Mesh(lensGeo, this.infinityDistortionMat);
+      this.barrierShieldGroup.add(lensMesh);
+    } else {
+      const plane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), this.barrierShieldMat);
+      const gridPlane = new THREE.Mesh(new THREE.PlaneGeometry(w, h, 8, 6), this.barrierBorderMat);
+      gridPlane.position.z = 0.01;
+      this.barrierShieldGroup.add(plane, gridPlane);
+    }
+    if (this.hero.id === 'gojo') {
+      this.barrierShieldGroup.position.set(0, 0.05, -2.4 - 0.8);
+    } else {
+      this.barrierShieldGroup.position.set(0, 0, -0.82);
+    }
     this.barrierShieldGroup.visible = false;
   }
 
@@ -386,9 +510,13 @@ export class FpsViewModel {
     isBarrierActive: boolean;
     barrierHpRatio: number;
     punchChargeRatio: number;
+    primaryChargeRatio?: number;
+    blueChargeRatio?: number;
     isExecutionerActive?: boolean;
   }) {
     this.punchChargeRatio = opts.punchChargeRatio;
+    this.primaryChargeRatio = opts.primaryChargeRatio ?? 0;
+    this.blueChargeRatio = opts.blueChargeRatio ?? 0;
 
     if (this.gavelHeadGroup && this.executionerSwordGroup) {
       const execActive = Boolean(opts.isExecutionerActive);
@@ -399,13 +527,20 @@ export class FpsViewModel {
     if (opts.isBarrierActive) {
       this.shieldDeployRatio = THREE.MathUtils.lerp(this.shieldDeployRatio, 1.0, 0.25);
       this.barrierShieldGroup.visible = true;
-      this.barrierShieldMat.opacity = 0.18 * this.shieldDeployRatio;
-      this.barrierBorderMat.opacity = (0.35 + (1 - opts.barrierHpRatio) * 0.35) * this.shieldDeployRatio;
+      if (this.infinityDistortionMat) {
+        this.infinityDistortionMat.uniforms.uDeployRatio.value = this.shieldDeployRatio;
+        this.infinityDistortionMat.uniforms.uPoolRatio.value = opts.barrierHpRatio;
+      } else {
+        this.barrierShieldMat.opacity = 0.18 * this.shieldDeployRatio;
+        this.barrierBorderMat.opacity = (0.35 + (1 - opts.barrierHpRatio) * 0.35) * this.shieldDeployRatio;
+      }
       this.barrierShieldGroup.scale.setScalar(0.5 + 0.5 * this.shieldDeployRatio);
     } else {
       this.shieldDeployRatio = THREE.MathUtils.lerp(this.shieldDeployRatio, 0.0, 0.25);
       if (this.shieldDeployRatio < 0.02) {
         this.barrierShieldGroup.visible = false;
+      } else if (this.infinityDistortionMat) {
+        this.infinityDistortionMat.uniforms.uDeployRatio.value = this.shieldDeployRatio;
       } else {
         this.barrierShieldMat.opacity = 0.18 * this.shieldDeployRatio;
         this.barrierBorderMat.opacity = 0.35 * this.shieldDeployRatio;
@@ -463,6 +598,54 @@ export class FpsViewModel {
     if (this.coreMesh) {
       this.coreMesh.rotation.x = elapsed * (3.5 + this.punchChargeRatio * 12);
       this.coreMesh.rotation.y = elapsed * (5.0 + this.punchChargeRatio * 12);
+    }
+
+    if (this.gojoPovBones.size > 0) {
+      const breath = Math.sin(elapsed * 2.4);
+      const firePulse = this.recoilOffset * 3.5 + Math.sin(this.castAnimProgress * Math.PI) * 0.45;
+      const eul = new THREE.Euler();
+      const qDelta = new THREE.Quaternion();
+      const poseFinger = (name: string, rx: number, ry = 0, rz = 0) => {
+        const rec = this.gojoPovBones.get(name);
+        if (!rec) return;
+        eul.set(rx, ry, rz, 'XYZ');
+        qDelta.setFromEuler(eul);
+        rec.bone.quaternion.copy(rec.restQuat).multiply(qDelta);
+      };
+
+      // Subtle finger-gun idle sway + thumb-hammer kick on shot, keeping Middle/Ring/Pinky curled in their finger-gun pose
+      poseFinger('Hand_1', breath * 0.02, 0, -firePulse * 0.16);
+      poseFinger('Index1', breath * 0.015, 0, -firePulse * 0.08);
+      poseFinger('Thumb1', 0, 0, breath * 0.025 + firePulse * 0.28);
+
+      if (this.infinityDistortionMat) {
+        this.infinityDistortionMat.uniforms.uTime.value = elapsed;
+      }
+    }
+
+    if (this.hero.id === 'gojo') {
+      if (this.gojoRedChargeOrb) {
+        if (this.primaryChargeRatio > 0.02) {
+          this.gojoRedChargeOrb.group.visible = true;
+          const s = 0.45 + this.primaryChargeRatio * 1.35;
+          this.gojoRedChargeOrb.setScale(s);
+          this.gojoRedChargeOrb.update(dt, elapsed);
+        } else {
+          this.gojoRedChargeOrb.group.visible = false;
+        }
+      }
+
+      if (this.gojoBlueChargeOrb) {
+        if (this.blueChargeRatio > 0.02) {
+          this.gojoBlueChargeOrb.group.visible = true;
+          // Expands dynamically as Blue is held and charged up
+          const s = 0.45 + this.blueChargeRatio * 2.15;
+          this.gojoBlueChargeOrb.setScale(s);
+          this.gojoBlueChargeOrb.update(dt, elapsed);
+        } else {
+          this.gojoBlueChargeOrb.group.visible = false;
+        }
+      }
     }
 
     // Left hand is only visible when actively performing a Quick Melee strike

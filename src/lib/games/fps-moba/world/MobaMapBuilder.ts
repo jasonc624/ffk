@@ -109,17 +109,6 @@ export class MobaMapBuilder {
     gridHelper.position.y = 0.02;
     scene.add(gridHelper);
 
-    // Glowing Lane Path Strips (Central Lane + Flank Lanes)
-    this.addGlowingStrip(scene, 0, 0.03, 0, 8.5, 128, 0x60a5fa, 0.22);
-    this.addGlowingStrip(scene, -24, 3.03, 0, 6.0, 42, 0x38bdf8, 0.25); // Left bridge top strip
-    this.addGlowingStrip(scene, 24, 3.03, 0, 6.0, 42, 0x38bdf8, 0.25);  // Right bridge top strip
-    this.addGlowingStrip(scene, 0, 0.04, 32, 1.4, 62, 0x38bdf8, 0.75);  // Blue half center line
-    this.addGlowingStrip(scene, 0, 0.04, -32, 1.4, 62, 0xf43f5e, 0.75); // Red half center line
-
-    // Blue & Red Spawn Sanctuaries
-    this.addSpawnPad(scene, 0, 68, 0x38bdf8);
-    this.addSpawnPad(scene, 0, -68, 0xf43f5e);
-
     // 4. Perimeter Arena Walls
     const wallMat = new THREE.MeshStandardMaterial({
       color: 0x475569,
@@ -151,65 +140,6 @@ export class MobaMapBuilder {
       this.addBoxObstacle(scene, 24, h / 2, zOffset, 6, h, 2.4, bridgeMat, true);
       this.addBoxObstacle(scene, 24, h / 2, -zOffset, 6, h, 2.4, bridgeMat, true);
     }
-
-    // 6. Midfield Tactical Cover Pillars & Chokepoint Monoliths
-    const pillarMat = new THREE.MeshStandardMaterial({
-      color: 0x64748b,
-      roughness: 0.45,
-      metalness: 0.25,
-      emissive: 0x0f172a,
-      emissiveIntensity: 0.35
-    });
-    const coverPositions = [
-      { x: -10, z: 16, w: 3.5, h: 4.5, d: 3.5 },
-      { x: 10, z: 16, w: 3.5, h: 4.5, d: 3.5 },
-      { x: -10, z: -16, w: 3.5, h: 4.5, d: 3.5 },
-      { x: 10, z: -16, w: 3.5, h: 4.5, d: 3.5 },
-      { x: -12, z: 42, w: 4.0, h: 5.0, d: 2.5 },
-      { x: 12, z: 42, w: 4.0, h: 5.0, d: 2.5 },
-      { x: -12, z: -42, w: 4.0, h: 5.0, d: 2.5 },
-      { x: 12, z: -42, w: 4.0, h: 5.0, d: 2.5 }
-    ];
-    coverPositions.forEach((p) => {
-      this.addBoxObstacle(scene, p.x, p.h / 2, p.z, p.w, p.h, p.d, pillarMat, true);
-    });
-  }
-
-  private addGlowingStrip(
-    scene: THREE.Scene,
-    x: number,
-    y: number,
-    z: number,
-    w: number,
-    d: number,
-    color: number,
-    opacity: number
-  ) {
-    const geo = new THREE.PlaneGeometry(w, d);
-    geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity,
-      depthWrite: false
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x, y, z);
-    scene.add(mesh);
-  }
-
-  private addSpawnPad(scene: THREE.Scene, x: number, z: number, color: number) {
-    const ringGeo = new THREE.RingGeometry(3.2, 4.0, 32);
-    ringGeo.rotateX(-Math.PI / 2);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.75,
-      side: THREE.DoubleSide
-    });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.position.set(x, 0.05, z);
-    scene.add(ring);
   }
 
   private addBoxObstacle(

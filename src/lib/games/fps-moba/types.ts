@@ -1,15 +1,21 @@
 export type MobaTeam = 'blue' | 'red';
 export type MobaUnitType = 'HERO' | 'MINION' | 'TOWER' | 'CORE';
-export type FpsAbilityKey = 'Q' | 'E' | 'F' | 'R';
+export type FpsAbilityKey = 'SHIFT' | 'E' | 'Q';
+
+export const STANDARD_CE_REGEN_PER_SEC = 4.0;
+export const CE_EXHAUSTION_LOCKOUT_SEC = 10.0;
 
 export type PrimaryFireMode = 'AUTO' | 'BURST' | 'SHOTGUN' | 'MELEE_CLEAVE' | 'HAND_CANNON';
 
 export interface SecondaryFireConfig {
   name: string;
-  kind: 'BARRIER_SHIELD' | 'CHARGED_PUNCH' | 'HELIX_ROCKET';
+  kind: 'BARRIER_SHIELD' | 'CHARGED_PUNCH' | 'HELIX_ROCKET' | 'LAPSE_BLUE_ORB';
   description: string;
-  // For BARRIER_SHIELD (Reinhardt / Brigitte)
+  manaCost?: number;
+  manaDrainPerSec?: number;
+  // For BARRIER_SHIELD (Reinhardt / Brigitte / Gojo Infinity)
   barrierMaxHp?: number;
+  barrierDrainPerSec?: number;
   barrierRegenPerSec?: number;
   // For CHARGED_PUNCH (Doomfist)
   minDamage?: number;
@@ -25,10 +31,17 @@ export interface FpsWeaponConfig {
   fireMode: PrimaryFireMode;
   viewModelType: 'RIFLE' | 'HAMMER' | 'FLAIL' | 'DOOM_GAUNTLET';
   damage: number;
+  maxDamage?: number; // For chargeable primary fire (Gojo Reversal Red)
+  manaCost?: number;
+  maxManaCost?: number;
   fireRateMs: number;
   range: number;
   cleaveArcDeg?: number; // For MELEE_CLEAVE (e.g. 115 degrees in front)
   knockback?: number;
+  maxKnockback?: number; // For chargeable primary fire
+  chargeable?: boolean;
+  maxChargeMs?: number;
+  isProjectileOrb?: boolean;
   pellets?: number;
   spread?: number;
   magazineSize: number; // 0 = infinite melee swings
@@ -39,7 +52,9 @@ export interface FpsWeaponConfig {
 
 export type FpsAbilityKind =
   | 'BLINK_DASH'
+  | 'LIMITLESS_TELEPORT'
   | 'GRAVITY_ORB'
+  | 'INFINITY_SHIELD'
   | 'BARRIER_WALL'
   | 'DOMAIN_ULT'
   | 'METEOR_LEAP'
@@ -65,6 +80,7 @@ export interface FpsAbilityDef {
   description: string;
   cooldownMs: number;
   manaCost: number;
+  manaDrainPerSec?: number;
   kind: FpsAbilityKind;
   damage: number;
   radius: number;
@@ -84,6 +100,7 @@ export interface FpsHeroDef {
   accentColor: string;
   maxHp: number;
   maxMana: number;
+  ceRegenMultiplier: number;
   moveSpeed: number;
   weapon: FpsWeaponConfig;
   secondaryFire: SecondaryFireConfig;
@@ -108,6 +125,8 @@ export interface DamagePopup {
   label?: string;
   isCrit: boolean;
   color: string;
+  ageSec?: number;
+  opacity?: number;
 }
 
 export interface MinimapBlip {
@@ -126,6 +145,8 @@ export interface FpsHudState {
   shield: number;
   mana: number;
   maxMana: number;
+  ceRegenPerSec: number;
+  manaExhaustedTimerSec: number;
   ammo: number;
   maxAmmo: number;
   isReloading: boolean;
@@ -133,7 +154,12 @@ export interface FpsHudState {
   isUsingSecondary: boolean;
   barrierHp: number;
   barrierMaxHp: number;
+  primaryChargeRatio: number; // 0..1 when holding M1 on Gojo Reversal Red
   punchChargeRatio: number; // 0..1 when holding M2 on Doomfist
+  blueChargeRatio?: number; // 0..1 when holding M2 to charge Gojo Lapse Blue
+  teleportPhase?: 'NONE' | 'AIMING' | 'CASTING'; // Gojo Limitless Teleport
+  teleportCastRatio?: number; // 0..1 during the teleport cast time
+  hasActiveBlueOrb?: boolean; // Gojo 2-stage Lapse Blue active in flight
   secondaryCooldownMs: number;
   isPowerEmpowered: boolean; // Doomfist Power Block empowered punch
   inspireTimerSec: number; // Brigitte Inspire active timer
@@ -150,6 +176,9 @@ export interface FpsHudState {
   hitMarkerAlpha: number;
   hitMarkerCrit: boolean;
   activeDomainName: string | null;
+  domainBarrierHp?: number;
+  domainBarrierMaxHp?: number;
+  canCastHollowPurple?: boolean;
   blueCoreHp: number;
   blueCoreMaxHp: number;
   redCoreHp: number;

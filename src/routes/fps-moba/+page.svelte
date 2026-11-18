@@ -34,7 +34,7 @@
     goto('/fps-moba/play');
   }
 
-  const abilityKeys: FpsAbilityKey[] = ['Q', 'E', 'F', 'R'];
+  const abilityKeys: FpsAbilityKey[] = ['SHIFT', 'E', 'Q'];
 </script>
 
 <svelte:head>
@@ -171,8 +171,8 @@
         <span class="text-xs text-slate-300">{selectedHero.passiveDesc}</span>
       </div>
 
-      <!-- Q / E / F / R Abilities -->
-      <div class="grid sm:grid-cols-2 gap-3">
+      <!-- SHIFT / E / Q Abilities -->
+      <div class="grid sm:grid-cols-3 gap-3">
         {#each abilityKeys as key}
           {@const ab = selectedHero.abilities[key]}
           <div class="bg-black/40 border border-white/10 rounded-xl p-4 flex flex-col justify-between">
@@ -182,7 +182,7 @@
                   class="font-['Share_Tech_Mono'] text-xs font-bold px-2.5 py-1 rounded"
                   style="background: {ab.color}33; color: {selectedHero.accentColor}; border: 1px solid {ab.color}66;"
                 >
-                  [{key}] {key === 'R' ? 'ULTIMATE DOMAIN' : 'ABILITY'}
+                  [{key}] {key === 'Q' ? 'ULTIMATE' : 'ABILITY'}
                 </span>
                 <span class="font-['Share_Tech_Mono'] text-[11px] text-slate-400">
                   {(ab.cooldownMs / 1000).toFixed(1)}s CD · {ab.manaCost} MP
@@ -203,9 +203,9 @@
 
   <!-- Footer Controls Summary -->
   <div class="max-w-6xl w-full mx-auto border-t border-white/10 pt-4 flex flex-wrap justify-between gap-4 font-['Share_Tech_Mono'] text-xs text-slate-500">
-    <div>MOVE: WASD + SHIFT (SPRINT) + SPACE (JUMP)</div>
+    <div>MOVE: WASD + SPACE (JUMP)</div>
     <div>AIM & SHOOT: MOUSE + LEFT CLICK (HEADSHOTS = 1.6× CRIT)</div>
-    <div>ABILITIES: [Q] [E] [F] · ULTIMATE DOMAIN: [R] · RELOAD: [C]</div>
+    <div>ABILITIES: [SHIFT] [E] · ULTIMATE: [Q] · RELOAD: [R] / [C]</div>
   </div>
 </div>
 
