@@ -139,7 +139,7 @@
             style="width: {(hud.teleportCastRatio ?? 0) * 100}%;"
           ></div>
           <div class="text-center font-['Share_Tech_Mono'] text-[10px] font-bold text-sky-200 mt-0.5">
-            TELEPORTING…
+            TELEPORTING · INVULNERABLE
           </div>
         </div>
       {/if}

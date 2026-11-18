@@ -26,6 +26,22 @@ import {
 } from './vfx/CursedShaderVfx';
 import { getMouseSensitivity } from './storage';
 import { FPS_MOBA_HEROES } from './data/heroes';
+import {
+  MobaEntity,
+  MobaUnitEntity,
+  HeroUnit,
+  MinionUnit,
+  StructureUnit,
+  DomainBarrierEntity,
+  type NpcAiState
+} from './entities/Entity';
+import {
+  DomainExpansion,
+  UnlimitedVoidDomain,
+  RallyBannerDomain,
+  type BarrierRaycastHit,
+  type BarrierDamageResult
+} from './entities/DomainExpansion';
 
 const BLUE_MIN_RADIUS = 3;
 const BLUE_MAX_RADIUS = 9;
@@ -34,39 +50,12 @@ const BLUE_CHARGE_DRAIN_PER_SEC = 26;
 const TELEPORT_MAX_RANGE = 30;
 const TELEPORT_CAM_DIST = 4.6;
 
-interface NpcAiState {
-  ce: number;
-  maxCe: number;
-  burnout: number;
-  regen: number;
-  cd: { red: number; blue: number; shift: number; infinity: number; domain: number };
-  busy: number;
-  think: number;
-  infinityHold: number;
-  strafeDir: 1 | -1;
-  strafeTimer: number;
-  wanderTimer: number;
-}
-
-interface NpcDomainState {
-  casterId: string;
-  center: THREE.Vector3;
-  radius: number;
-  ageSec: number;
-  remainingSec: number;
-  tickSec: number;
-  playerTrapped: boolean;
-  purpleFired: boolean;
-  ringMesh: THREE.Mesh;
-  voidVfx: UnlimitedVoidDomainController;
-  color: string;
-}
-
-interface MobaUnit {
+export interface MobaUnit {
   id: string;
   name: string;
   team: MobaTeam;
   type: MobaUnitType;
+  isDestructable?: boolean;
   group: THREE.Group;
   bodyMesh: THREE.Mesh;
   headMesh?: THREE.Mesh;
@@ -95,6 +84,7 @@ interface MobaUnit {
   npcShieldTimer?: number;
   npcShieldMesh?: THREE.Mesh;
   npcShieldMat?: THREE.ShaderMaterial;
+  npcShieldAudio?: THREE.PositionalAudio;
   npcCast?: { t: number; dur: number; target: THREE.Vector3; marker: THREE.Group };
   roamPhase?: HeroAnimHint;
   roamTimer?: number;
@@ -163,7 +153,26 @@ export class FpsMobaEngine {
   private teleportMarker: THREE.Group | null = null;
   private teleportCamBlend = 0;
   private teleportMorph = 0;
-  private npcDomain: NpcDomainState | null = null;
+  private activeDomains: DomainExpansion[] = [];
+  private isPlayerDestructable = true;
+
+  get activeDomain(): DomainExpansion | null {
+    return this.activeDomains.find((d) => d.casterId === 'player') ?? null;
+  }
+
+  get npcDomain(): DomainExpansion | null {
+    return this.activeDomains.find((d) => d.casterId !== 'player') ?? null;
+  }
+
+  getPrimaryActiveDomain(): DomainExpansion | null {
+    const trappedEnemyDom = this.activeDomains.find(
+      (d) => d.casterId !== 'player' && d.isPlayerTrapped
+    );
+    if (trappedEnemyDom) return trappedEnemyDom;
+    const playerDom = this.activeDomain;
+    if (playerDom) return playerDom;
+    return this.activeDomains[0] ?? null;
+  }
   private playerAvatar: {
     group: THREE.Group;
     animate: (elapsed: number, isMoving: boolean, isStunned: boolean, animHint?: HeroAnimHint) => void;
@@ -185,26 +194,6 @@ export class FpsMobaEngine {
 
   // Cooldowns
   private cooldowns: Record<FpsAbilityKey, { remainingMs: number; totalMs: number }>;
-
-  // Domain Expansion / Rally Ultimate state
-  private activeDomain: {
-    name: string;
-    isRally: boolean;
-    isGojoDomain: boolean;
-    center: THREE.Vector3;
-    radius: number;
-    hp: number;
-    maxHp: number;
-    trappedUnitIds: Set<string>;
-    purpleTriggered: boolean;
-    ageSec: number;
-    remainingMs: number;
-    tickTimerMs: number;
-    color: string;
-    domeMesh: THREE.Mesh;
-    ringMesh: THREE.Mesh;
-    voidVfx?: UnlimitedVoidDomainController;
-  } | null = null;
 
   // Input state
   private keys: Set<string> = new Set();
@@ -229,6 +218,13 @@ export class FpsMobaEngine {
   private winner: MobaTeam | null = null;
   private destroyed = false;
   private animFrameId = 0;
+
+  // ── Web Audio & 3D Spatial Audio System ──
+  private audioListener!: THREE.AudioListener;
+  private audioLoader = new THREE.AudioLoader();
+  private audioBuffers = new Map<string, AudioBuffer>();
+  private playerShieldAudio: THREE.Audio | null = null;
+  private playerDomainAudio: THREE.Audio | null = null;
 
   // Bound event listeners
   private onKeyDownBound: (e: KeyboardEvent) => void;
@@ -276,6 +272,9 @@ export class FpsMobaEngine {
         this.punchChargeMs = 0;
         this.cancelBlueCharge();
         this.cancelTeleport();
+        this.stopAllAudio();
+      } else {
+        this.resumeAudioContext();
       }
       this.emitHud();
     };
@@ -297,6 +296,15 @@ export class FpsMobaEngine {
     this.camera = new THREE.PerspectiveCamera(75, w / h, 0.1, 260);
     this.camera.rotation.order = 'YXZ';
     this.scene.add(this.camera);
+
+    // ── Attach 3D Spatial AudioListener to Camera ──
+    this.audioListener = new THREE.AudioListener();
+    this.camera.add(this.audioListener);
+
+    // Preload Gojo audio buffers for zero-latency 3D playback
+    this.loadAudioBuffer('/assets/sounds/gojo/infinity_shield_hum.mp3').catch(() => {});
+    this.loadAudioBuffer('/assets/sounds/gojo/hollow_purple_start.mp3').catch(() => {});
+    this.loadAudioBuffer('/assets/sounds/gojo/unlimited_void.mp3').catch(() => {});
 
     const canvas = document.createElement('canvas');
     const gl2 = canvas.getContext('webgl2', {
@@ -383,7 +391,7 @@ export class FpsMobaEngine {
     const hpBarFill = this.createFloatingHpBar(group, height + 1.2, 2.8, team);
     this.scene.add(group);
 
-    const unit: MobaUnit = {
+    const unit = new StructureUnit({
       id,
       name,
       team,
@@ -392,19 +400,17 @@ export class FpsMobaEngine {
       bodyMesh: baseMesh,
       headMesh: crystalMesh,
       hpBarFill,
-      hp: maxHp,
       maxHp,
       radius,
       height,
       attackRange,
       attackDamage,
       attackCooldown: 1.25,
-      attackTimer: 0,
       moveSpeed: 0,
       goldValue: type === 'CORE' ? 500 : 250,
       xpValue: type === 'CORE' ? 300 : 180,
-      alive: true
-    };
+      isDestructable: true
+    });
     baseMesh.userData.unit = unit;
     crystalMesh.userData.unit = unit;
     crystalMesh.userData.isHead = true;
@@ -429,7 +435,7 @@ export class FpsMobaEngine {
     group.position.copy(spawnPos);
     this.scene.add(group);
 
-    const unit: MobaUnit = {
+    const unit = new HeroUnit({
       id: `enemy_hero_${rivalHero.id}`,
       name: `Rival ${rivalHero.name} [AI]`,
       team: 'red',
@@ -441,22 +447,19 @@ export class FpsMobaEngine {
       hpBarFill,
       nameplateMesh,
       animateRig: animate,
-      hp: rivalHero.maxHp,
       maxHp: rivalHero.maxHp,
       radius: 0.72,
       height: 2.25,
       attackRange: 22,
       attackDamage: 18,
       attackCooldown: 0.9,
-      attackTimer: 0,
       moveSpeed: 9.0,
       goldValue: 300,
       xpValue: 160,
-      alive: true,
-      respawnTimer: 0,
-      spawnPos,
-      knockbackVel: new THREE.Vector3()
-    };
+      isDestructable: true,
+      spawnPos
+    });
+    unit.respawnTimer = 0;
     hitMeshes.forEach((m) => {
       m.userData.unit = unit;
     });
@@ -498,7 +501,7 @@ export class FpsMobaEngine {
       shieldMesh.visible = false;
       group.add(shieldMesh);
 
-      const unit: MobaUnit = {
+      const unit = new HeroUnit({
         id: `dummy_hero_${hero.id}`,
         name: `${hero.name} [NPC]`,
         team: 'red',
@@ -510,18 +513,16 @@ export class FpsMobaEngine {
         hpBarFill,
         nameplateMesh,
         animateRig: animate,
-        hp: hero.maxHp,
         maxHp: hero.maxHp,
         radius: 0.75,
         height: 2.25,
         attackRange: hero.weapon.range,
         attackDamage: hero.weapon.damage,
         attackCooldown: hero.weapon.fireRateMs / 1000,
-        attackTimer: 1.5,
         moveSpeed: hero.moveSpeed,
         goldValue: 50,
         xpValue: 40,
-        alive: true,
+        isDestructable: true,
         isDummy: true,
         isRoamer: hero.id === 'mr_biomaster' || hero.id === 'gojo',
         heroDef: hero,
@@ -532,27 +533,26 @@ export class FpsMobaEngine {
                 maxCe: hero.maxMana,
                 burnout: 0,
                 regen: STANDARD_CE_REGEN_PER_SEC * hero.ceRegenMultiplier,
-                cd: { red: 1, blue: 3, shift: 0, infinity: 0, domain: 6 },
+                cd: { red: 2, blue: 4, shift: 1, infinity: 3, domain: 1.5 },
                 busy: 0,
-                think: 1.0,
+                think: 0.5,
                 infinityHold: 0,
                 strafeDir: 1,
                 strafeTimer: 1.5,
                 wanderTimer: 0
               }
             : undefined,
-        npcAbilityTimer: hero.id === 'gojo' ? 2.4 : 3.2,
-        npcAbilityIndex: 0,
-        npcShieldTimer: 0,
-        npcShieldMesh: shieldMesh,
-        npcShieldMat: shieldMat,
-        roamPhase: 'idle',
-        roamTimer: hero.id === 'gojo' ? 5.8 : 4.1,
-        outOfCombatTimer: 0,
-        respawnTimer: 0,
-        spawnPos,
-        knockbackVel: new THREE.Vector3()
-      };
+        spawnPos
+      });
+      unit.attackTimer = 1.5;
+      unit.npcAbilityTimer = hero.id === 'gojo' ? 2.4 : 3.2;
+      unit.npcAbilityIndex = 0;
+      unit.npcShieldTimer = 0;
+      unit.npcShieldMesh = shieldMesh;
+      unit.npcShieldMat = shieldMat;
+      unit.roamPhase = 'idle';
+      unit.roamTimer = hero.id === 'gojo' ? 5.8 : 4.1;
+      unit.respawnTimer = 0;
 
       hitMeshes.forEach((m) => {
         m.userData.unit = unit;
@@ -627,7 +627,7 @@ export class FpsMobaEngine {
         const hpBarFill = this.createFloatingHpBar(group, 2.05, 1.2, team);
         this.scene.add(group);
 
-        const unit: MobaUnit = {
+        const unit = new MinionUnit({
           id,
           name: `${team === 'blue' ? 'Allied' : 'Enemy'} Trooper`,
           team,
@@ -636,20 +636,18 @@ export class FpsMobaEngine {
           bodyMesh,
           headMesh,
           hpBarFill,
-          hp: 95 + this.waveCount * 6,
           maxHp: 95 + this.waveCount * 6,
           radius: 0.55,
           height: 1.6,
           attackRange: 9,
           attackDamage: 10,
           attackCooldown: 1.2,
-          attackTimer: Math.random() * 0.5,
           moveSpeed: 6.4,
           goldValue: 45,
           xpValue: 35,
-          alive: true,
-          knockbackVel: new THREE.Vector3()
-        };
+          isDestructable: true
+        });
+        unit.attackTimer = Math.random() * 0.5;
         bodyMesh.userData.unit = unit;
         headMesh.userData.unit = unit;
         headMesh.userData.isHead = true;
@@ -823,19 +821,8 @@ export class FpsMobaEngine {
     const resolved = this.mapBuilder.resolveHorizontalCollision(x, z, 0.7, this.playerPos.y);
     x = resolved.x;
     z = resolved.z;
-    const dom = this.activeDomain;
-    if (dom && !dom.isRally) {
-      const ddx = x - dom.center.x;
-      const ddz = z - dom.center.z;
-      const dd = Math.hypot(ddx, ddz);
-      const maxR = Math.max(1.0, dom.radius - 0.75);
-      if (dd > maxR && dd > 0.0001) {
-        x = dom.center.x + (ddx / dd) * maxR;
-        z = dom.center.z + (ddz / dd) * maxR;
-      }
-    }
-    if (this.npcDomain) {
-      const c = this.clampPlayerToNpcDomain(x, z);
+    for (const d of this.activeDomains) {
+      const c = d.clampPosition({ x, z }, 0.7, d.isPlayerTrapped);
       x = c.x;
       z = c.z;
     }
@@ -1008,7 +995,7 @@ export class FpsMobaEngine {
   }
 
   private isBarrierActive(): boolean {
-    if (this.playerRespawnTimer > 0 || !this.canSpendCursedEnergy()) return false;
+    if (this.playerRespawnTimer > 0 || !this.canSpendCursedEnergy() || this.teleportPhase !== 'NONE') return false;
     if (this.hero.abilities.E.kind === 'INFINITY_SHIELD') {
       return this.keys.has('KeyE') && this.cooldowns.E.remainingMs <= 0;
     }
@@ -1202,6 +1189,7 @@ export class FpsMobaEngine {
   }
 
   private KnockbackUnitWithWallSlam(unit: MobaUnit, dir: THREE.Vector3, pushDist: number, wallSlamDamage: number) {
+    if (unit.npcCast) return;
     // Knockback unit movement with active Domain barrier containment
     let slammed = false;
     for (let i = 1; i <= 8; i++) {
@@ -1346,12 +1334,25 @@ export class FpsMobaEngine {
       raycaster.far = wep.range;
       raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
 
+      // Check if ray strikes any active Domain Barrier from the outside
+      let barrierHit: { dom: DomainExpansion; point: THREE.Vector3; distance: number } | null = null;
+      for (const dom of this.activeDomains) {
+        const b = dom.raycastBarrier(raycaster.ray.origin, raycaster.ray.direction, wep.range);
+        if (b && (!barrierHit || b.distance < barrierHit.distance)) {
+          barrierHit = { dom, point: b.point, distance: b.distance };
+        }
+      }
+
       const hits = raycaster.intersectObjects(allTargets, false);
       let endPoint = raycaster.ray.origin
         .clone()
         .add(raycaster.ray.direction.clone().multiplyScalar(wep.range));
 
-      if (hits.length > 0) {
+      if (barrierHit && (!hits.length || barrierHit.distance < hits[0].distance)) {
+        endPoint = barrierHit.point;
+        const dmg = Math.round(shotBaseDamage + (this.level - 1) * 2.5);
+        this.damageDomainBarrier(barrierHit.dom, dmg, barrierHit.point, this.hero.name);
+      } else if (hits.length > 0) {
         const hit = hits[0];
         endPoint = hit.point;
         const unit = hit.object.userData.unit as MobaUnit | undefined;
@@ -1480,6 +1481,17 @@ export class FpsMobaEngine {
         const prevPos = redOrb.group.position.clone();
         const stepDist = speed * dt;
         redOrb.group.position.addScaledVector(vel, dt);
+
+        // Check collision with domain barriers from the outside
+        for (const dom of this.activeDomains) {
+          const bHit = dom.raycastBarrier(prevPos, forward, stepDist + orbRadius);
+          if (bHit) {
+            detonate(bHit.point);
+            const dmg = Math.round(shotBaseDamage + (this.level - 1) * 2.5);
+            this.damageDomainBarrier(dom, dmg, bHit.point, this.hero.name);
+            return;
+          }
+        }
 
         // 1. Check direct proximity collision with enemy units
         for (const u of this.units) {
@@ -2223,81 +2235,51 @@ export class FpsMobaEngine {
       this.endActiveDomain();
     }
 
-    const center = this.playerPos.clone();
     const isGojoDomain = this.hero.id === 'gojo' && !isRally;
-    const domeGeo = new THREE.IcosahedronGeometry(ab.radius, 3);
-    const domeMat = new THREE.MeshBasicMaterial({
-      color: ab.color,
-      wireframe: true,
-      transparent: true,
-      opacity: isRally ? 0.22 : 0.38,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending
-    });
-    const domeMesh = new THREE.Mesh(domeGeo, domeMat);
-    domeMesh.position.copy(center);
-    domeMesh.visible = !isGojoDomain;
-    this.scene.add(domeMesh);
-
-    const ringGeo = new THREE.RingGeometry(ab.radius * 0.94, ab.radius, 48);
-    ringGeo.rotateX(-Math.PI / 2);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: isGojoDomain ? '#a855f7' : ab.color,
-      transparent: true,
-      opacity: 0.85,
-      side: THREE.DoubleSide
-    });
-    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-    ringMesh.position.set(center.x, 0.08, center.z);
-    this.scene.add(ringMesh);
-
-    let voidVfx: UnlimitedVoidDomainController | undefined;
-    if (isGojoDomain) {
-      voidVfx = createUnlimitedVoidDomainVfx(center, ab.radius);
-      this.scene.add(voidVfx.root);
-    }
-
-    const trappedUnitIds = new Set<string>();
-    if (!isRally) {
-      for (const u of this.units) {
-        if (!u.alive) continue;
-        const dx = u.group.position.x - center.x;
-        const dz = u.group.position.z - center.z;
-        if (Math.hypot(dx, dz) <= ab.radius) {
-          trappedUnitIds.add(u.id);
-        }
-      }
-    }
-
-    this.activeDomain = {
+    const dom = new DomainExpansion({
       name: ab.name,
-      isRally,
-      isGojoDomain,
-      center,
+      casterId: 'player',
+      casterName: this.hero.name,
+      casterTeam: 'blue',
+      center: this.playerPos.clone(),
       radius: ab.radius,
-      hp: 1200,
-      maxHp: 1200,
-      trappedUnitIds,
-      purpleTriggered: false,
-      ageSec: 0,
-      remainingMs: ab.durationMs,
-      tickTimerMs: 250,
+      durationMs: ab.durationMs,
       color: ab.color,
-      domeMesh,
-      ringMesh,
-      voidVfx
-    };
+      barrierHp: 1200,
+      barrierMaxHp: 1200,
+      isDestructable: true,
+      isGojoDomain,
+      isRally,
+      scene: this.scene,
+      initialUnits: this.units,
+      playerPos: this.playerPos,
+      isPlayerAlive: this.playerRespawnTimer <= 0
+    });
+    this.activeDomains.push(dom);
+    if (isGojoDomain) {
+      if (this.playerDomainAudio) {
+        try { this.playerDomainAudio.stop(); } catch {}
+      }
+      this.playerDomainAudio = this.playGlobalSound('/assets/sounds/gojo/unlimited_void.mp3', { volume: 0.85 });
+    }
   }
 
   private endActiveDomain() {
-    if (!this.activeDomain) return;
-    const wasGojoDomain = this.activeDomain.isGojoDomain;
-    this.scene.remove(this.activeDomain.domeMesh);
-    this.scene.remove(this.activeDomain.ringMesh);
-    if (this.activeDomain.voidVfx) {
-      this.scene.remove(this.activeDomain.voidVfx.root);
+    const dom = this.activeDomain;
+    if (!dom) return;
+    const wasGojoDomain = dom.isGojoDomain;
+    if (wasGojoDomain && this.playerDomainAudio) {
+      try {
+        this.playerDomainAudio.stop();
+        this.playerDomainAudio.disconnect();
+      } catch {}
+      this.playerDomainAudio = null;
     }
-    this.activeDomain = null;
+    dom.cleanup(this.scene);
+    const idx = this.activeDomains.indexOf(dom);
+    if (idx !== -1) {
+      this.activeDomains.splice(idx, 1);
+    }
     if (wasGojoDomain) {
       this.cooldowns.Q.remainingMs = this.hero.abilities.Q.cooldownMs;
     }
@@ -2308,44 +2290,116 @@ export class FpsMobaEngine {
    * Returns true if the unit collided against the barrier shell.
    */
   private clampUnitToDomainBarrier(unit: MobaUnit): boolean {
-    const dom = this.activeDomain;
-    if (!dom || dom.isRally) return false;
-    const dx = unit.group.position.x - dom.center.x;
-    const dz = unit.group.position.z - dom.center.z;
-    const dist = Math.hypot(dx, dz);
-
-    if (dom.trappedUnitIds.has(unit.id)) {
-      const maxInner = Math.max(0.5, dom.radius - unit.radius - 0.15);
-      if (dist > maxInner && dist > 0.0001) {
-        unit.group.position.x = dom.center.x + (dx / dist) * maxInner;
-        unit.group.position.z = dom.center.z + (dz / dist) * maxInner;
-        return true;
-      }
-    } else {
-      const minOuter = dom.radius + unit.radius + 0.1;
-      if (dist < minOuter) {
-        if (dist > 0.0001) {
-          unit.group.position.x = dom.center.x + (dx / dist) * minOuter;
-          unit.group.position.z = dom.center.z + (dz / dist) * minOuter;
-        } else {
-          unit.group.position.z = dom.center.z + minOuter;
-        }
-        return true;
+    let collided = false;
+    for (const dom of this.activeDomains) {
+      const isTrapped = dom.isTrapped(unit.id);
+      const c = dom.clampPosition(
+        { x: unit.group.position.x, z: unit.group.position.z },
+        unit.radius,
+        isTrapped
+      );
+      if (c.collided) {
+        unit.group.position.x = c.x;
+        unit.group.position.z = c.z;
+        collided = true;
       }
     }
-    return false;
+    return collided;
   }
 
   /** Returns 0.10 (90% slow) for any enemy caught inside an active Domain barrier, or 1.0 otherwise. */
   private getDomainSlowMultiplier(unit: MobaUnit): number {
-    const dom = this.activeDomain;
-    if (!dom || dom.isRally || unit.team !== 'red') return 1.0;
-    const dx = unit.group.position.x - dom.center.x;
-    const dz = unit.group.position.z - dom.center.z;
-    if (dom.trappedUnitIds.has(unit.id) || Math.hypot(dx, dz) <= dom.radius) {
-      return 0.1;
+    let mult = 1.0;
+    for (const dom of this.activeDomains) {
+      mult = Math.min(mult, dom.getSlowMultiplier(unit.id, unit.team));
     }
-    return 1.0;
+    return mult;
+  }
+
+  /**
+   * Outside attacks deal damage directly to the barrier HP of a Domain Expansion.
+   */
+  private damageDomainBarrier(
+    dom: DomainExpansion,
+    damage: number,
+    hitPoint: THREE.Vector3,
+    attackerName: string
+  ) {
+    const res = dom.takeBarrierDamage(damage);
+    this.spawnImpactRing(hitPoint, dom.color, 1.8);
+    this.spawnPillarEffect(hitPoint, 0.35, 1.8, '#38bdf8', 0.25);
+    this.hitMarkerAlpha = 1.0;
+
+    const projected = hitPoint.clone().project(this.camera);
+    if (projected.z < 1) {
+      const sx = (projected.x * 0.5 + 0.5) * 100;
+      const sy = (-projected.y * 0.5 + 0.5) * 100;
+      this.damagePopups.push({
+        id: this.popupCounter++,
+        x: THREE.MathUtils.clamp(sx + (Math.random() - 0.5) * 3, 10, 90),
+        y: THREE.MathUtils.clamp(sy + (Math.random() - 0.5) * 3, 10, 90),
+        amount: damage,
+        label: 'BARRIER',
+        isCrit: false,
+        color: '#38bdf8',
+        ageSec: 0,
+        opacity: 1
+      });
+      if (this.damagePopups.length > 10) this.damagePopups.shift();
+    }
+
+    if (res.shattered) {
+      this.shatterDomain(dom, attackerName);
+    }
+  }
+
+  /**
+   * Shatters a domain barrier: triggers collapse effects, inflicts 10s burnout on the caster, and frees everyone.
+   */
+  private shatterDomain(dom: DomainExpansion, breakerName?: string) {
+    dom.isCollapsed = true;
+    if (dom.isGojoDomain && dom.casterId === 'player' && this.playerDomainAudio) {
+      try {
+        this.playerDomainAudio.stop();
+        this.playerDomainAudio.disconnect();
+      } catch {}
+      this.playerDomainAudio = null;
+    }
+    this.spawnImpactRing(dom.center.clone().add(new THREE.Vector3(0, 0.2, 0)), dom.color, dom.radius * 1.35);
+    this.spawnTransmissionStreaks(dom.center, 'burst', 1.0);
+    this.spawnTransmissionStreaks(dom.center.clone().add(new THREE.Vector3(0, 4.5, 0)), 'burst', 0.85);
+
+    this.damagePopups.push({
+      id: this.popupCounter++,
+      x: 50,
+      y: 35,
+      amount: 0,
+      label: 'DOMAIN SHATTERED!',
+      isCrit: true,
+      color: '#f43f5e',
+      ageSec: 0,
+      opacity: 1
+    });
+
+    if (dom.casterId === 'player') {
+      this.manaExhaustedTimerSec = CE_EXHAUSTION_LOCKOUT_SEC;
+      this.mana = 0;
+      this.cooldowns.Q.remainingMs = this.hero.abilities.Q.cooldownMs;
+    } else {
+      const casterUnit = this.units.find((u) => u.id === dom.casterId);
+      if (casterUnit && casterUnit.npcAi) {
+        casterUnit.npcAi.burnout = CE_EXHAUSTION_LOCKOUT_SEC;
+        casterUnit.npcAi.ce = 0;
+        casterUnit.npcAi.cd.domain = 20.0;
+        casterUnit.npcAi.busy = 0.5;
+      }
+    }
+
+    dom.cleanup(this.scene);
+    const idx = this.activeDomains.indexOf(dom);
+    if (idx !== -1) {
+      this.activeDomains.splice(idx, 1);
+    }
   }
 
   /**
@@ -2356,6 +2410,7 @@ export class FpsMobaEngine {
     if (!this.activeDomain || this.activeDomain.purpleTriggered) return;
     this.activeDomain.purpleTriggered = true;
     this.viewModel.triggerCastGesture();
+    this.playGlobalSound('/assets/sounds/gojo/hollow_purple_start.mp3', { volume: 1.0 });
 
     const fusionGroup = new THREE.Group();
     const redOrb = createCursedEnergyOrb({ variant: 'RED', radius: 0.5 });
@@ -2527,6 +2582,27 @@ export class FpsMobaEngine {
     customLabel?: string
   ) {
     if (!unit.alive || this.winner) return;
+    if (unit.isDestructable === false) return;
+    if (unit.npcCast) {
+      const projected = hitWorldPos.clone().project(this.camera);
+      if (projected.z < 1) {
+        const sx = (projected.x * 0.5 + 0.5) * 100;
+        const sy = (-projected.y * 0.5 + 0.5) * 100;
+        this.damagePopups.push({
+          id: this.popupCounter++,
+          x: THREE.MathUtils.clamp(sx, 10, 90),
+          y: THREE.MathUtils.clamp(sy, 10, 90),
+          amount: 0,
+          label: 'INVULNERABLE',
+          isCrit: false,
+          color: '#38bdf8',
+          ageSec: 0,
+          opacity: 1
+        });
+        if (this.damagePopups.length > 10) this.damagePopups.shift();
+      }
+      return;
+    }
     if (this.isShieldedByNpcInfinity(unit) && sourceName !== 'HOLLOW PURPLE') {
       const projected = hitWorldPos.clone().project(this.camera);
       if (projected.z < 1) {
@@ -2839,16 +2915,16 @@ export class FpsMobaEngine {
     if (!this.winner && this.pointerLocked) {
       this.matchTimeSec += dt;
       this.updatePlayer(dt, elapsed);
-      this.updateDomainExpansion(dt);
-      this.updateNpcDomain(dt);
+      this.updateDomains(dt, elapsed);
       this.updateMobaUnits(dt, elapsed);
     }
 
+    this.updateAudio(dt);
     this.updateVfx(dt);
     this.mapBuilder.updateSky(
       elapsed,
-      Boolean(this.activeDomain || this.npcDomain),
-      this.activeDomain?.color ?? this.npcDomain?.color
+      this.activeDomains.length > 0,
+      this.activeDomains[0]?.color
     );
     this.composer.render();
 
@@ -2858,6 +2934,197 @@ export class FpsMobaEngine {
       this.emitHud();
     }
   };
+
+  // ─────────────────────────────────────────────────────────────
+  //  Web Audio & 3D Spatial Audio System
+  // ─────────────────────────────────────────────────────────────
+  private resumeAudioContext() {
+    if (this.audioListener && this.audioListener.context && this.audioListener.context.state === 'suspended') {
+      this.audioListener.context.resume().catch(() => {});
+    }
+  }
+
+  private loadAudioBuffer(url: string): Promise<AudioBuffer> {
+    const cached = this.audioBuffers.get(url);
+    if (cached) return Promise.resolve(cached);
+
+    return new Promise((resolve, reject) => {
+      this.audioLoader.load(
+        url,
+        (buffer) => {
+          this.audioBuffers.set(url, buffer);
+          resolve(buffer);
+        },
+        undefined,
+        (err) => {
+          console.warn('Failed to load spatial audio buffer:', url, err);
+          reject(err);
+        }
+      );
+    });
+  }
+
+  /**
+   * Plays a 3D localized sound attached to a scene Object3D (e.g. NPC hero or domain mesh).
+   * Web Audio HRTF panner calculates true 3D spatial panning and distance rolloff.
+   */
+  private playSpatialSound(
+    url: string,
+    parent: THREE.Object3D,
+    opts: {
+      volume?: number;
+      loop?: boolean;
+      refDistance?: number;
+      maxDistance?: number;
+      rolloff?: number;
+    } = {}
+  ): THREE.PositionalAudio | null {
+    if (!this.audioListener) return null;
+    this.resumeAudioContext();
+
+    const sound = new THREE.PositionalAudio(this.audioListener);
+    sound.setRefDistance(opts.refDistance ?? 8);
+    sound.setMaxDistance(opts.maxDistance ?? 45);
+    sound.setRolloffFactor(opts.rolloff ?? 1.2);
+    sound.setVolume(opts.volume ?? 1.0);
+    sound.setLoop(opts.loop ?? false);
+
+    parent.add(sound);
+
+    const onPlay = (buf: AudioBuffer) => {
+      if (this.destroyed) return;
+      sound.setBuffer(buf);
+      sound.play();
+    };
+
+    const cached = this.audioBuffers.get(url);
+    if (cached) {
+      onPlay(cached);
+    } else {
+      this.loadAudioBuffer(url).then(onPlay).catch(() => {});
+    }
+
+    if (!opts.loop) {
+      const origOnEnded = sound.onEnded.bind(sound);
+      sound.onEnded = () => {
+        origOnEnded();
+        parent.remove(sound);
+        try {
+          sound.disconnect();
+        } catch {}
+      };
+    }
+
+    return sound;
+  }
+
+  /**
+   * Plays a non-positional global sound (for the local player's own perspective).
+   */
+  private playGlobalSound(
+    url: string,
+    opts: {
+      volume?: number;
+      loop?: boolean;
+    } = {}
+  ): THREE.Audio | null {
+    if (!this.audioListener) return null;
+    this.resumeAudioContext();
+
+    const sound = new THREE.Audio(this.audioListener);
+    sound.setVolume(opts.volume ?? 1.0);
+    sound.setLoop(opts.loop ?? false);
+
+    const onPlay = (buf: AudioBuffer) => {
+      if (this.destroyed) return;
+      sound.setBuffer(buf);
+      sound.play();
+    };
+
+    const cached = this.audioBuffers.get(url);
+    if (cached) {
+      onPlay(cached);
+    } else {
+      this.loadAudioBuffer(url).then(onPlay).catch(() => {});
+    }
+
+    return sound;
+  }
+
+  private stopAllAudio() {
+    if (this.playerShieldAudio) {
+      try {
+        this.playerShieldAudio.stop();
+        this.playerShieldAudio.disconnect();
+      } catch {}
+      this.playerShieldAudio = null;
+    }
+    if (this.playerDomainAudio) {
+      try {
+        this.playerDomainAudio.stop();
+        this.playerDomainAudio.disconnect();
+      } catch {}
+      this.playerDomainAudio = null;
+    }
+    for (const u of this.units) {
+      if (u.npcShieldAudio) {
+        try {
+          u.npcShieldAudio.stop();
+          u.group.remove(u.npcShieldAudio);
+          u.npcShieldAudio.disconnect();
+        } catch {}
+        u.npcShieldAudio = undefined;
+      }
+    }
+    for (const dom of this.activeDomains) {
+      if (dom.audio) {
+        try {
+          dom.audio.stop();
+          dom.audio.disconnect();
+        } catch {}
+        dom.audio = undefined;
+      }
+    }
+  }
+
+  private updateAudio(dt: number) {
+    if (this.destroyed) return;
+
+    // ── Local Player Infinity Shield Hum ──
+    const playerShieldActive =
+      !this.winner &&
+      this.pointerLocked &&
+      this.playerRespawnTimer <= 0 &&
+      this.hero.abilities.E.kind === 'INFINITY_SHIELD' &&
+      this.isBarrierActive();
+
+    if (playerShieldActive) {
+      if (!this.playerShieldAudio) {
+        this.playerShieldAudio = this.playGlobalSound('/assets/sounds/gojo/infinity_shield_hum.mp3', {
+          volume: 0.5,
+          loop: true
+        });
+      }
+    } else if (this.playerShieldAudio) {
+      try {
+        this.playerShieldAudio.stop();
+        this.playerShieldAudio.disconnect();
+      } catch {}
+      this.playerShieldAudio = null;
+    }
+
+    // ── Local Player Domain Cleanup Check ──
+    if (this.playerDomainAudio && this.playerDomainAudio.isPlaying) {
+      const pDom = this.activeDomain;
+      if (!pDom || !pDom.isGojoDomain || this.winner || !this.pointerLocked) {
+        try {
+          this.playerDomainAudio.stop();
+          this.playerDomainAudio.disconnect();
+        } catch {}
+        this.playerDomainAudio = null;
+      }
+    }
+  }
 
   private updatePlayer(dt: number, elapsed: number) {
     const dtMs = dt * 1000;
@@ -3000,7 +3267,12 @@ export class FpsMobaEngine {
     const domainSpeedBonus = this.activeDomain ? 1.28 : 1.0;
     const shieldPenalty = this.isBarrierActive() || this.isChargingPunch ? 0.72 : 1.0;
     const teleportSlow = this.teleportPhase !== 'NONE' ? 0 : 1.0;
-    const npcDomainSlow = this.npcDomain?.playerTrapped ? 0.1 : 1.0;
+    let npcDomainSlow = 1.0;
+    for (const dom of this.activeDomains) {
+      if (dom.casterId !== 'player' && dom.isPlayerTrapped) {
+        npcDomainSlow = Math.min(npcDomainSlow, 0.1);
+      }
+    }
     const speed = this.hero.moveSpeed * domainSpeedBonus * shieldPenalty * teleportSlow * npcDomainSlow;
 
     const forwardVec = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
@@ -3033,21 +3305,13 @@ export class FpsMobaEngine {
     this.playerPos.x = resolved.x;
     this.playerPos.z = resolved.z;
 
-    // Keep player inside their own active Domain barrier
-    if (this.activeDomain && !this.activeDomain.isRally) {
-      const dx = this.playerPos.x - this.activeDomain.center.x;
-      const dz = this.playerPos.z - this.activeDomain.center.z;
-      const dist = Math.hypot(dx, dz);
-      const maxR = Math.max(1.0, this.activeDomain.radius - 0.75);
-      if (dist > maxR && dist > 0.0001) {
-        this.playerPos.x = this.activeDomain.center.x + (dx / dist) * maxR;
-        this.playerPos.z = this.activeDomain.center.z + (dz / dist) * maxR;
-      }
-    }
-
-    // Enemy (NPC) Domain: trapped players cannot leave, others cannot enter
-    if (this.npcDomain) {
-      const c = this.clampPlayerToNpcDomain(this.playerPos.x, this.playerPos.z);
+    // Enforce Domain barrier boundary for player: trapped players cannot leave, outside players cannot enter
+    for (const dom of this.activeDomains) {
+      const c = dom.clampPosition(
+        { x: this.playerPos.x, z: this.playerPos.z },
+        0.65,
+        dom.isPlayerTrapped
+      );
       this.playerPos.x = c.x;
       this.playerPos.z = c.z;
     }
@@ -3105,48 +3369,80 @@ export class FpsMobaEngine {
     this.camera.rotation.x = this.pitch;
   }
 
-  private updateDomainExpansion(dt: number) {
-    if (!this.activeDomain) return;
-    const dom = this.activeDomain;
-    dom.ageSec += dt;
-    dom.remainingMs -= dt * 1000;
-    dom.tickTimerMs -= dt * 1000;
+  private updateDomains(dt: number, elapsed: number) {
+    for (let i = this.activeDomains.length - 1; i >= 0; i--) {
+      const dom = this.activeDomains[i];
 
-    if (dom.voidVfx) {
-      dom.voidVfx.update(dt, this.clock.getElapsedTime(), dom.ageSec, this.camera.position);
-    }
+      // Check if caster is still alive
+      if (dom.casterId === 'player') {
+        if (this.playerRespawnTimer > 0) {
+          if (dom.isGojoDomain && this.playerDomainAudio) {
+            try { this.playerDomainAudio.stop(); this.playerDomainAudio.disconnect(); } catch {}
+            this.playerDomainAudio = null;
+          }
+          dom.cleanup(this.scene);
+          this.activeDomains.splice(i, 1);
+          continue;
+        }
+      } else {
+        const caster = this.units.find((u) => u.id === dom.casterId);
+        if (!caster || !caster.alive) {
+          dom.cleanup(this.scene);
+          this.activeDomains.splice(i, 1);
+          continue;
+        }
+      }
 
-    // Brigitte's Rally follows the player!
-    if (dom.isRally) {
-      dom.center.copy(this.playerPos);
-      dom.domeMesh.position.copy(this.playerPos);
-      dom.ringMesh.position.set(this.playerPos.x, this.playerPos.y + 0.08, this.playerPos.z);
-      this.shield = Math.min(200, this.shield + 35 * dt);
-      this.hp = Math.min(this.maxHp, this.hp + 25 * dt);
-    }
+      // Brigitte's Rally follows the player
+      if (dom.isRally && dom.casterId === 'player') {
+        dom.center.copy(this.playerPos);
+        dom.domeMesh.position.copy(this.playerPos);
+        dom.ringMesh.position.set(this.playerPos.x, this.playerPos.y + 0.08, this.playerPos.z);
+        this.shield = Math.min(200, this.shield + 35 * dt);
+        this.hp = Math.min(this.maxHp, this.hp + 25 * dt);
+      }
 
-    dom.domeMesh.rotation.y += dt * 0.35;
-    dom.ringMesh.rotation.z -= dt * 0.6;
+      const res = dom.update(dt, elapsed, this.camera.position);
 
-    if (dom.tickTimerMs <= 0) {
-      dom.tickTimerMs = 950;
-      for (const u of this.units) {
-        if (!u.alive || u.team !== 'red') continue;
-        if (u.group.position.distanceTo(dom.center) <= dom.radius) {
+      if (res.isExpired) {
+        if (dom.hp <= 0) {
+          this.shatterDomain(dom);
+        } else {
+          if (dom.isGojoDomain && dom.casterId === 'player' && this.playerDomainAudio) {
+            try { this.playerDomainAudio.stop(); this.playerDomainAudio.disconnect(); } catch {}
+            this.playerDomainAudio = null;
+          }
+          dom.cleanup(this.scene);
+          const idx = this.activeDomains.indexOf(dom);
+          if (idx !== -1) this.activeDomains.splice(idx, 1);
+          if (dom.casterId === 'player' && dom.isGojoDomain) {
+            this.cooldowns.Q.remainingMs = this.hero.abilities.Q.cooldownMs;
+          }
+        }
+        continue;
+      }
+
+      if (res.shouldTickDamage) {
+        // Trapped player takes tick damage if inside an enemy domain
+        if (dom.isPlayerTrapped && dom.isEnemy('blue') && this.playerRespawnTimer <= 0) {
+          this.spawnPillarEffect(this.playerPos, 0.9, 10, dom.color, 0.45);
+          this.applyDamageToPlayer(10, `${dom.casterName} (${dom.name})`, dom.casterTeam);
+        }
+
+        // Trapped enemy units receive domain tick damage & stun
+        for (const u of this.units) {
+          if (!u.alive || !dom.isEnemy(u.team) || !dom.isTrapped(u.id)) continue;
           this.spawnPillarEffect(u.group.position, 0.9, 10, dom.color, 0.45);
+          const tickDmg = dom.isGojoDomain ? 18 : 12;
           this.damageUnit(
             u,
-            this.hero.abilities.Q.damage,
+            tickDmg,
             false,
             dom.name,
             u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.8, 0))
           );
         }
       }
-    }
-
-    if (dom.remainingMs <= 0 || dom.hp <= 0) {
-      this.endActiveDomain();
     }
   }
 
@@ -3167,7 +3463,7 @@ export class FpsMobaEngine {
               u.npcAi.ce = u.npcAi.maxCe;
               u.npcAi.burnout = 0;
               u.npcAi.busy = 0;
-              u.npcAi.cd = { red: 1, blue: 3, shift: 0, infinity: 0, domain: 6 };
+              u.npcAi.cd = { red: 2, blue: 4, shift: 1, infinity: 3, domain: 2.0 };
             }
           }
         } else if (u.type === 'MINION') {
@@ -3435,8 +3731,16 @@ export class FpsMobaEngine {
     }
     u.npcShieldTimer = 0;
     if (u.npcShieldMesh) u.npcShieldMesh.visible = false;
+    if (u.npcShieldAudio) {
+      try {
+        u.npcShieldAudio.stop();
+        u.group.remove(u.npcShieldAudio);
+        u.npcShieldAudio.disconnect();
+      } catch {}
+      u.npcShieldAudio = undefined;
+    }
     if (u.npcAi) u.npcAi.infinityHold = 0;
-    if (this.npcDomain?.casterId === u.id) this.endNpcDomain();
+    this.endNpcDomain(u.id);
   }
 
   private updateNpcGojoAi(u: MobaUnit, dt: number, elapsed: number) {
@@ -3455,12 +3759,12 @@ export class FpsMobaEngine {
 
     if (ai.burnout > 0) {
       ai.burnout = Math.max(0, ai.burnout - dt);
-      if (ai.burnout === 0) ai.ce = Math.min(ai.maxCe, 15);
+      if (ai.burnout === 0) ai.ce = Math.min(ai.maxCe, 80);
     } else if (ai.infinityHold > 0) {
       ai.infinityHold -= dt;
       this.npcSpendCe(u, (hero.abilities.E.manaDrainPerSec ?? 30) * dt);
       u.npcShieldTimer = 0.3;
-      if (ai.infinityHold <= 0) {
+      if (ai.infinityHold <= 0 || ai.ce <= 25) {
         ai.infinityHold = 0;
         u.npcShieldTimer = 0;
         ai.cd.infinity = hero.abilities.E.cooldownMs / 1000;
@@ -3547,7 +3851,7 @@ export class FpsMobaEngine {
       u.group.position.x = resolved.x;
       u.group.position.z = resolved.z;
     }
-    const ownDomain = this.npcDomain && this.npcDomain.casterId === u.id ? this.npcDomain : null;
+    const ownDomain = this.activeDomains.find((d) => d.casterId === u.id) ?? null;
     if (ownDomain) {
       const ox = u.group.position.x - ownDomain.center.x;
       const oz = u.group.position.z - ownDomain.center.z;
@@ -3568,7 +3872,7 @@ export class FpsMobaEngine {
 
     // Inside his own Domain: let the player feel the void, then finish with Hollow Purple
     if (ownDomain) {
-      if (!ownDomain.purpleFired && ownDomain.ageSec >= 2.4 && ai.ce >= 35 && playerAlive) {
+      if (!ownDomain.purpleTriggered && ownDomain.ageSec >= 2.4 && ai.ce >= 35 && playerAlive) {
         this.npcCastPurple(u, ownDomain);
       } else if (ai.cd.red <= 0 && ai.ce >= 20 && playerAlive) {
         this.npcCastRed(u);
@@ -3579,8 +3883,24 @@ export class FpsMobaEngine {
     if (ai.infinityHold > 0) return;
 
     const q = hero.abilities.Q;
-    if (ai.cd.domain <= 0 && ai.ce >= q.manaCost && d <= 24) {
-      this.npcCastDomain(u);
+    // 1. Ready to cast Domain Expansion: Unlimited Void
+    if (ai.cd.domain <= 0 && ai.ce >= q.manaCost) {
+      if (d <= 24) {
+        this.npcCastDomain(u);
+        return;
+      } else if (d <= 38 && ai.cd.shift <= 0) {
+        // Teleport into engage range and then expand domain
+        this.npcCastTeleport(u, 'approach');
+        return;
+      }
+    }
+
+    // 2. Conserve Cursed Energy when Domain is off cooldown or almost ready
+    const savingForDomain = ai.cd.domain <= 4.0 && ai.ce < q.manaCost;
+    if (savingForDomain) {
+      if (ai.cd.red <= 0 && ai.ce >= 55 && d <= 45) {
+        this.npcCastRed(u);
+      }
       return;
     }
     if (ai.cd.infinity <= 0 && ai.ce >= 30 && d <= 26 && Math.random() < 0.3) {
@@ -3707,11 +4027,11 @@ export class FpsMobaEngine {
     this.activateNpcDomain(u);
   }
 
-  private npcCastPurple(u: MobaUnit, dom: NpcDomainState) {
+  private npcCastPurple(u: MobaUnit, dom: DomainExpansion) {
     const ai = u.npcAi;
     if (!ai) return;
     this.npcSpendCe(u, 35);
-    dom.purpleFired = true;
+    dom.purpleTriggered = true;
     ai.busy = 1.0;
     const origin = u.group.position.clone().add(new THREE.Vector3(0, 1.35, 0));
     const dir = this.npcAimPoint(u).sub(origin).normalize();
@@ -3719,92 +4039,55 @@ export class FpsMobaEngine {
   }
 
   private activateNpcDomain(u: MobaUnit) {
-    const q = u.heroDef!.abilities.Q;
-    if (this.npcDomain) this.endNpcDomain();
-    const center = u.group.position.clone();
-    const ringGeo = new THREE.RingGeometry(q.radius * 0.94, q.radius, 48);
-    ringGeo.rotateX(-Math.PI / 2);
-    const ringMesh = new THREE.Mesh(
-      ringGeo,
-      new THREE.MeshBasicMaterial({ color: '#a855f7', transparent: true, opacity: 0.85, side: THREE.DoubleSide })
-    );
-    ringMesh.position.set(center.x, 0.08, center.z);
-    this.scene.add(ringMesh);
-    const voidVfx = createUnlimitedVoidDomainVfx(center, q.radius);
-    this.scene.add(voidVfx.root);
-    const trapped =
-      this.playerRespawnTimer <= 0 &&
-      Math.hypot(this.playerPos.x - center.x, this.playerPos.z - center.z) <= q.radius;
-    this.npcDomain = {
+    const q = u.heroDef?.abilities.Q;
+    if (!q) return;
+    this.endNpcDomain(u.id);
+    const dom = new DomainExpansion({
+      name: q.name,
       casterId: u.id,
-      center,
+      casterName: u.name,
+      casterTeam: u.team,
+      center: u.group.position.clone(),
       radius: q.radius,
-      ageSec: 0,
-      remainingSec: q.durationMs / 1000,
-      tickSec: 0.95,
-      playerTrapped: trapped,
-      purpleFired: false,
-      ringMesh,
-      voidVfx,
-      color: q.color
-    };
-    this.spawnImpactRing(center.clone().add(new THREE.Vector3(0, 0.2, 0)), '#a855f7', q.radius);
-  }
+      durationMs: q.durationMs,
+      color: q.color,
+      barrierHp: 1200,
+      barrierMaxHp: 1200,
+      isDestructable: true,
+      isGojoDomain: u.heroDef?.id === 'gojo',
+      scene: this.scene,
+      initialUnits: this.units,
+      playerPos: this.playerPos,
+      isPlayerAlive: this.playerRespawnTimer <= 0
+    });
+    this.activeDomains.push(dom);
+    this.spawnImpactRing(dom.center.clone().add(new THREE.Vector3(0, 0.2, 0)), '#a855f7', q.radius);
 
-  private endNpcDomain() {
-    const dom = this.npcDomain;
-    if (!dom) return;
-    this.scene.remove(dom.ringMesh);
-    this.scene.remove(dom.voidVfx.root);
-    this.npcDomain = null;
-  }
-
-  private updateNpcDomain(dt: number) {
-    const dom = this.npcDomain;
-    if (!dom) return;
-    dom.ageSec += dt;
-    dom.remainingSec -= dt;
-    dom.tickSec -= dt;
-    dom.voidVfx.update(dt, this.clock.getElapsedTime(), dom.ageSec, this.camera.position);
-    dom.ringMesh.rotation.y -= dt * 0.6;
-
-    const caster = this.units.find((x) => x.id === dom.casterId);
-    if (!caster || !caster.alive || dom.remainingSec <= 0) {
-      this.endNpcDomain();
-      return;
-    }
-    if (this.playerRespawnTimer > 0) dom.playerTrapped = false;
-
-    // Trapped player is pinned inside (and slowed 90% in updatePlayer); others cannot walk in
-    if (dom.playerTrapped && dom.tickSec <= 0) {
-      dom.tickSec = 0.95;
-      this.spawnPillarEffect(this.playerPos, 0.9, 10, '#a855f7', 0.45);
-      this.applyDamageToPlayer(10, `${caster.name} (Unlimited Void)`, caster.team);
-    }
-  }
-
-  /** Keeps the player inside (if trapped) or outside (if not) an active NPC Domain shell. */
-  private clampPlayerToNpcDomain(x: number, z: number): { x: number; z: number } {
-    const dom = this.npcDomain;
-    if (!dom) return { x, z };
-    const dx = x - dom.center.x;
-    const dz = z - dom.center.z;
-    const dist = Math.hypot(dx, dz);
-    if (dom.playerTrapped) {
-      const maxR = Math.max(1.0, dom.radius - 0.75);
-      if (dist > maxR && dist > 0.0001) {
-        return { x: dom.center.x + (dx / dist) * maxR, z: dom.center.z + (dz / dist) * maxR };
-      }
-    } else {
-      const minR = dom.radius + 0.75;
-      if (dist < minR) {
-        if (dist > 0.0001) {
-          return { x: dom.center.x + (dx / dist) * minR, z: dom.center.z + (dz / dist) * minR };
+    if (u.heroDef?.id === 'gojo') {
+      dom.audio = this.playSpatialSound(
+        '/assets/sounds/gojo/unlimited_void.mp3',
+        dom.domeMesh,
+        {
+          volume: 0.9,
+          refDistance: dom.radius * 0.9,
+          maxDistance: dom.radius + 38,
+          rolloff: 1.2
         }
-        return { x, z: dom.center.z + minR };
+      ) ?? undefined;
+    }
+  }
+
+  private endNpcDomain(casterId?: string) {
+    const toRemove = casterId
+      ? this.activeDomains.filter((d) => d.casterId === casterId)
+      : this.activeDomains.filter((d) => d.casterId !== 'player');
+    for (const dom of toRemove) {
+      dom.cleanup(this.scene);
+      const idx = this.activeDomains.indexOf(dom);
+      if (idx !== -1) {
+        this.activeDomains.splice(idx, 1);
       }
     }
-    return { x, z };
   }
 
   private pickRandomRoamTarget(radius: number): THREE.Vector3 {
@@ -3835,7 +4118,7 @@ export class FpsMobaEngine {
     const hero = u.heroDef;
     if (!hero || !u.alive) return;
 
-    // Update active NPC Infinity / Barrier shield distortion visual
+    // Update active NPC Infinity / Barrier shield distortion visual + 3D localized hum
     if (u.npcShieldTimer && u.npcShieldTimer > 0) {
       u.npcShieldTimer = Math.max(0, u.npcShieldTimer - dt);
       if (u.npcShieldMesh && u.npcShieldMat) {
@@ -3844,8 +4127,25 @@ export class FpsMobaEngine {
         u.npcShieldMat.uniforms.uDeployRatio.value = Math.min(1, u.npcShieldTimer * 3.5);
         u.npcShieldMat.uniforms.uPoolRatio.value = Math.min(1, u.npcShieldTimer / 2.2);
       }
-    } else if (u.npcShieldMesh) {
-      u.npcShieldMesh.visible = false;
+      if (!u.npcShieldAudio && u.heroDef?.abilities?.E?.kind === 'INFINITY_SHIELD') {
+        u.npcShieldAudio = this.playSpatialSound(
+          '/assets/sounds/gojo/infinity_shield_hum.mp3',
+          u.group,
+          { volume: 0.85, loop: true, refDistance: 6, maxDistance: 36, rolloff: 1.3 }
+        ) ?? undefined;
+      }
+    } else {
+      if (u.npcShieldMesh) {
+        u.npcShieldMesh.visible = false;
+      }
+      if (u.npcShieldAudio) {
+        try {
+          u.npcShieldAudio.stop();
+          u.group.remove(u.npcShieldAudio);
+          u.npcShieldAudio.disconnect();
+        } catch {}
+        u.npcShieldAudio = undefined;
+      }
     }
 
     // Limitless Teleport cast (800ms): stands still, streaks gather, then blinks to the marked point
@@ -3913,98 +4213,6 @@ export class FpsMobaEngine {
 
     const stepIndex = u.npcAbilityIndex ?? 0;
     u.npcAbilityIndex = (stepIndex + 1) % 5;
-
-    if (hero.id === 'gojo') {
-      if (stepIndex === 0) {
-        // 1. Reversal Red (M1): charges at his hand (growing orb), then fires scaled by the charge
-        const chargeSec = 0.35 + Math.random() * 0.75;
-        u.npcAbilityTimer = 2.8 + chargeSec;
-        this.npcChargeOrb(u, 'RED', chargeSec, 900, (ratio) => {
-          const o = u.group.position.clone().add(new THREE.Vector3(0, 1.35, 0));
-          const tgt =
-            this.playerRespawnTimer <= 0
-              ? this.playerPos.clone().add(new THREE.Vector3(0, 1.2, 0))
-              : o.clone().addScaledVector(flatDir, 10);
-          const d = tgt.sub(o).normalize();
-          this.launchNpcGojoRedOrb(u, o.clone().addScaledVector(d, 0.9), d, ratio);
-        });
-      } else if (stepIndex === 1) {
-        // 2. Lapse Blue (M2): same shared implementation the player uses — charged radius,
-        // ground indicator once launched, gradual swirling pull, then an explosion
-        const chargeSec = 0.5 + Math.random() * 1.0;
-        u.npcAbilityTimer = 4.2 + chargeSec;
-        this.npcChargeOrb(u, 'BLUE', chargeSec, BLUE_MAX_CHARGE_MS, (ratio) => {
-          const radius = BLUE_MIN_RADIUS + (BLUE_MAX_RADIUS - BLUE_MIN_RADIUS) * ratio;
-          const o = u.group.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-          const tgt =
-            this.playerRespawnTimer <= 0
-              ? this.playerPos.clone().add(new THREE.Vector3(0, 1.2, 0))
-              : o.clone().addScaledVector(flatDir, 10);
-          const d = tgt.clone().sub(o).normalize();
-          const distToTarget = tgt.distanceTo(o);
-          this.launchTwoStageBlueOrb({
-            forward: d,
-            startPos: o.clone().addScaledVector(d, 1.0),
-            caster: u,
-            radius,
-            damage: Math.round(30 * (1 + ratio * 0.9)),
-            durationMs: 3200,
-            name: 'Lapse Blue',
-            color: hero.secondaryFire.color,
-            // Detonate roughly when the orb reaches the target
-            autoTriggerSec: Math.min(2.4, Math.max(0.6, (distToTarget - 1.0) / 14.5)),
-            onCooldownStart: () => {}
-          });
-        });
-      } else if (stepIndex === 2) {
-        // 3. Infinity Shield (E Spatial Distortion Barrier) — 4m x 3m wall that also covers allies
-        u.npcAbilityTimer = 3.4;
-        u.npcShieldTimer = 2.8;
-        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 1.2, 0)), '#e0f2fe', 3.2);
-      } else if (stepIndex === 3) {
-        // 4. Limitless Teleport (SHIFT): 800ms cast with transmission streaks at departure & arrival
-        u.npcAbilityTimer = 2.6 + 0.8;
-        const castSec = hero.abilities.SHIFT.durationMs / 1000;
-        let dx = flatDir.x * 11;
-        let dz = flatDir.z * 11;
-        if (distToPlayer <= 36) {
-          // Land ~5m beside the player
-          const side = Math.random() < 0.5 ? -1 : 1;
-          const away = new THREE.Vector3(
-            u.group.position.x - this.playerPos.x,
-            0,
-            u.group.position.z - this.playerPos.z
-          ).normalize();
-          const perp = new THREE.Vector3(-away.z, 0, away.x).multiplyScalar(side * 4.5);
-          dx = this.playerPos.x + away.x * 3 + perp.x - u.group.position.x;
-          dz = this.playerPos.z + away.z * 3 + perp.z - u.group.position.z;
-        }
-        const resolved = this.mapBuilder.resolveHorizontalCollision(
-          u.group.position.x + dx,
-          u.group.position.z + dz,
-          u.radius,
-          u.group.position.y
-        );
-        const target = new THREE.Vector3(
-          resolved.x,
-          this.mapBuilder.getFloorHeight(resolved.x, resolved.z, u.group.position.y),
-          resolved.z
-        );
-        const marker = this.createRadiusIndicator(hero.abilities.SHIFT.color);
-        this.placeIndicator(marker, target.x, target.z, 1.6);
-        u.npcCast = { t: 0, dur: castSec, target, marker };
-        u.roamPhase = 'idle';
-        u.roamTimer = Math.max(u.roamTimer ?? 0, castSec + 0.3);
-        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.15, 0)), hero.abilities.SHIFT.color, 2.6);
-        this.spawnTransmissionStreaks(u.group.position, 'converge', castSec);
-        this.spawnTransmissionStreaks(target, 'converge', castSec);
-      } else {
-        // 5. Hollow Technique: Purple (Q Fusion of Red & Blue -> Massive Singularity Projectile)
-        u.npcAbilityTimer = 5.2;
-        this.launchNpcGojoHollowPurple(u, origin.clone(), aimDir);
-      }
-      return;
-    }
 
     // Mr. Biomaster (or any other NPC Hero) ability rotation
     if (stepIndex === 0) {
@@ -4083,7 +4291,7 @@ export class FpsMobaEngine {
       this.applyDamageToPlayer(playerDmg, `${caster.name} (${abilityName})`, caster.team);
     }
     for (const other of this.units) {
-      if (!other.alive || other === caster) continue;
+      if (!other.alive || other === caster || other.isDestructable === false) continue;
       if (other.group.position.distanceTo(center) <= radius + other.radius) {
         other.hp = Math.max(1, other.hp - playerDmg);
       }
@@ -4119,7 +4327,18 @@ export class FpsMobaEngine {
           return;
         }
         redOrb.update(dt, this.clock.getElapsedTime());
+        const prevPos = redOrb.group.position.clone();
         redOrb.group.position.addScaledVector(vel, dt);
+
+        // Check collision with domain barriers from outside
+        for (const dom of this.activeDomains) {
+          const bHit = dom.raycastBarrier(prevPos, dir, speed * dt + orbRadius);
+          if (bHit) {
+            detonate(bHit.point);
+            this.damageDomainBarrier(dom, damage, bHit.point, caster.name);
+            return;
+          }
+        }
 
         if (
           this.playerRespawnTimer <= 0 &&
@@ -4188,6 +4407,14 @@ export class FpsMobaEngine {
     fusionGroup.add(redOrb.group, blueOrb.group, purpleOrb.group);
     fusionGroup.position.copy(origin).addScaledVector(dir, 1.4);
     this.scene.add(fusionGroup);
+
+    // ── 3D Spatial Audio: Localized to the spiraling orbs & flying singularity ──
+    this.playSpatialSound('/assets/sounds/gojo/hollow_purple_start.mp3', fusionGroup, {
+      volume: 1.0,
+      refDistance: 8,
+      maxDistance: 52,
+      rolloff: 1.1
+    });
 
     const fusionDuration = 0.75;
     const totalDuration = 2.6;
@@ -4260,7 +4487,24 @@ export class FpsMobaEngine {
   }
 
   private applyDamageToPlayer(dmg: number, attackerName: string, attackerTeam: MobaTeam) {
-    if (this.playerRespawnTimer > 0 || this.winner) return;
+    if (this.playerRespawnTimer > 0 || this.winner || !this.isPlayerDestructable) return;
+
+    // Gojo is invulnerable during the 800ms Limitless Teleport cast phase
+    if (this.teleportPhase === 'CASTING') {
+      this.damagePopups.push({
+        id: this.popupCounter++,
+        x: 50,
+        y: 40,
+        amount: 0,
+        label: 'INVULNERABLE',
+        isCrit: false,
+        color: '#38bdf8',
+        ageSec: 0,
+        opacity: 1
+      });
+      if (this.damagePopups.length > 10) this.damagePopups.shift();
+      return;
+    }
 
     let remaining = dmg;
 
@@ -4375,22 +4619,21 @@ export class FpsMobaEngine {
       hitMarkerAlpha: this.hitMarkerAlpha,
       hitMarkerCrit: this.hitMarkerCrit,
       activeDomainName:
-        this.activeDomain?.name ??
-        (this.npcDomain
-          ? this.npcDomain.playerTrapped
-            ? `ENEMY DOMAIN: UNLIMITED VOID · TRAPPED (${Math.ceil(this.npcDomain.remainingSec)}s)`
-            : 'ENEMY DOMAIN: UNLIMITED VOID'
+        (this.getPrimaryActiveDomain()
+          ? this.getPrimaryActiveDomain()!.isPlayerTrapped && this.getPrimaryActiveDomain()!.casterId !== 'player'
+            ? `ENEMY DOMAIN: ${this.getPrimaryActiveDomain()!.name.toUpperCase()} · TRAPPED (${Math.ceil(this.getPrimaryActiveDomain()!.remainingSec)}s)`
+            : this.getPrimaryActiveDomain()!.name.toUpperCase()
           : null) ??
         (this.executionerTimerSec > 0
           ? `DEADLY SENTENCING · EXECUTIONER'S SWORD (${this.executionerTimerSec.toFixed(1)}s)`
           : null),
       domainBarrierHp:
-        this.activeDomain && !this.activeDomain.isRally
-          ? Math.round(this.activeDomain.hp)
+        this.getPrimaryActiveDomain() && !this.getPrimaryActiveDomain()!.isRally
+          ? Math.round(this.getPrimaryActiveDomain()!.hp)
           : undefined,
       domainBarrierMaxHp:
-        this.activeDomain && !this.activeDomain.isRally
-          ? this.activeDomain.maxHp
+        this.getPrimaryActiveDomain() && !this.getPrimaryActiveDomain()!.isRally
+          ? this.getPrimaryActiveDomain()!.maxHp
           : undefined,
       canCastHollowPurple: Boolean(
         this.activeDomain?.isGojoDomain && !this.activeDomain.purpleTriggered
@@ -4419,6 +4662,18 @@ export class FpsMobaEngine {
   public destroy() {
     this.destroyed = true;
     cancelAnimationFrame(this.animFrameId);
+    this.stopAllAudio();
+    if (this.audioListener) {
+      try {
+        this.camera.remove(this.audioListener);
+        this.audioListener.context.close().catch(() => {});
+      } catch {
+        // Ignore audio context close error
+      }
+    }
+    this.audioBuffers.clear();
+    this.playerShieldAudio = null;
+    this.playerDomainAudio = null;
     document.exitPointerLock?.();
     window.removeEventListener('keydown', this.onKeyDownBound);
     window.removeEventListener('keyup', this.onKeyUpBound);
