@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import type { MobaTeam } from '../types';
 import type { MobaUnit } from '../FpsMobaEngine';
 import {
+  createChimeraShadowDomainVfx,
+  createIronMountainDomainVfx,
+  createSkyVeilDomainVfx,
   createUnlimitedVoidDomainVfx,
   type UnlimitedVoidDomainController
 } from '../vfx/CursedShaderVfx';
@@ -20,6 +23,9 @@ export interface DomainExpansionConfig {
   barrierMaxHp?: number;
   isDestructable?: boolean;
   isGojoDomain?: boolean;
+  isJogoDomain?: boolean;
+  isMegumiDomain?: boolean;
+  isUroDomain?: boolean;
   isRally?: boolean;
   scene: THREE.Scene;
   initialUnits: MobaUnit[];
@@ -58,6 +64,9 @@ export class DomainExpansion {
   maxHp: number;
   isDestructable: boolean;
   isGojoDomain: boolean;
+  isJogoDomain: boolean;
+  isMegumiDomain: boolean;
+  isUroDomain: boolean;
   isRally: boolean;
   color: string;
 
@@ -81,14 +90,25 @@ export class DomainExpansion {
     this.casterName = config.casterName;
     this.casterTeam = config.casterTeam;
     this.center = config.center.clone();
+    if (!config.isRally) {
+      // Always anchor Domain Expansion to the main flat arena surface (y = 0)
+      // so mid-air casts render the floor, perimeter props, and dome flush with the ground.
+      this.center.y = 0;
+    }
     this.radius = config.radius;
     this.maxHp = config.barrierMaxHp ?? 1200;
     this.hp = config.barrierHp ?? this.maxHp;
     this.isDestructable = config.isDestructable ?? true;
     this.isGojoDomain = config.isGojoDomain ?? false;
+    this.isJogoDomain = config.isJogoDomain ?? false;
+    this.isMegumiDomain = config.isMegumiDomain ?? false;
+    this.isUroDomain = config.isUroDomain ?? false;
     this.isRally = config.isRally ?? false;
     this.color = config.color;
     this.remainingSec = config.durationMs / 1000;
+    if (this.isJogoDomain) {
+      this.tickTimerSec = 1.0;
+    }
 
     // ── 1. Trap EVERYONE inside the domain perimeter upon expansion ──
     if (!this.isRally) {
@@ -120,13 +140,22 @@ export class DomainExpansion {
     });
     this.domeMesh = new THREE.Mesh(domeGeo, domeMat);
     this.domeMesh.position.copy(this.center);
-    this.domeMesh.visible = !this.isGojoDomain;
+    this.domeMesh.visible =
+      !this.isGojoDomain && !this.isJogoDomain && !this.isMegumiDomain && !this.isUroDomain;
     config.scene.add(this.domeMesh);
 
     const ringGeo = new THREE.RingGeometry(this.radius * 0.94, this.radius, 48);
     ringGeo.rotateX(-Math.PI / 2);
     const ringMat = new THREE.MeshBasicMaterial({
-      color: this.isGojoDomain ? '#a855f7' : this.color,
+      color: this.isGojoDomain
+        ? '#a855f7'
+        : this.isJogoDomain
+          ? '#f97316'
+          : this.isMegumiDomain
+            ? '#6366f1'
+            : this.isUroDomain
+              ? '#67e8f9'
+              : this.color,
       transparent: true,
       opacity: 0.85,
       side: THREE.DoubleSide
@@ -135,9 +164,18 @@ export class DomainExpansion {
     this.ringMesh.position.set(this.center.x, 0.08, this.center.z);
     config.scene.add(this.ringMesh);
 
-    // ── 3. Unlimited Void specific volumetric shader VFX ──
+    // ── 3. Character-specific volumetric shader Domain VFX ──
     if (this.isGojoDomain) {
       this.voidVfx = createUnlimitedVoidDomainVfx(this.center, this.radius);
+      config.scene.add(this.voidVfx.root);
+    } else if (this.isJogoDomain) {
+      this.voidVfx = createIronMountainDomainVfx(this.center, this.radius);
+      config.scene.add(this.voidVfx.root);
+    } else if (this.isMegumiDomain) {
+      this.voidVfx = createChimeraShadowDomainVfx(this.center, this.radius);
+      config.scene.add(this.voidVfx.root);
+    } else if (this.isUroDomain) {
+      this.voidVfx = createSkyVeilDomainVfx(this.center, this.radius);
       config.scene.add(this.voidVfx.root);
     }
   }
@@ -172,11 +210,21 @@ export class DomainExpansion {
    * - Outsider entities cannot cross inside (clamped outside).
    */
   clampPosition(
-    pos: { x: number; z: number },
+    pos: { x: number; z: number; y?: number },
     entityRadius: number,
     trapped: boolean
   ): { x: number; z: number; collided: boolean } {
     if (this.isRally) return { x: pos.x, z: pos.z, collided: false };
+
+    // If the entity is standing, jumping, or teleporting above the domain dome, allow traversing over it
+    if (pos.y !== undefined && pos.y >= this.center.y + this.radius) {
+      return { x: pos.x, z: pos.z, collided: false };
+    }
+
+    const effectiveRadius =
+      pos.y !== undefined && pos.y > this.center.y
+        ? Math.sqrt(Math.max(0, this.radius * this.radius - Math.pow(pos.y - this.center.y, 2)))
+        : this.radius;
 
     const dx = pos.x - this.center.x;
     const dz = pos.z - this.center.z;
@@ -185,7 +233,7 @@ export class DomainExpansion {
 
     if (trapped) {
       // Must stay inside
-      const maxInner = Math.max(0.5, this.radius - entityRadius - 0.15);
+      const maxInner = Math.max(0.5, effectiveRadius - entityRadius - 0.15);
       if (dist > maxInner) {
         return {
           x: this.center.x + (dx / dist) * maxInner,
@@ -195,7 +243,7 @@ export class DomainExpansion {
       }
     } else {
       // Must stay outside
-      const minOuter = this.radius + entityRadius + 0.1;
+      const minOuter = effectiveRadius + entityRadius + 0.1;
       if (dist < minOuter) {
         return {
           x: this.center.x + (dx / dist) * minOuter,
@@ -303,11 +351,11 @@ export class DomainExpansion {
 
     let shouldTick = false;
     if (this.tickTimerSec <= 0) {
-      this.tickTimerSec = 0.95;
+      this.tickTimerSec = this.isJogoDomain ? 1.0 : 0.95;
       shouldTick = true;
     }
 
-    const isExpired = this.remainingSec <= 0 || this.hp <= 0;
+    const isExpired = (this.remainingSec <= 0 && !this.purpleTriggered) || this.hp <= 0;
     if (isExpired) {
       this.isCollapsed = true;
     }

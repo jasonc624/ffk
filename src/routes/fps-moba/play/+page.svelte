@@ -2,12 +2,23 @@
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { FpsMobaEngine } from '$lib/games/fps-moba/FpsMobaEngine';
+  import { FPS_MOBA_HEROES } from '$lib/games/fps-moba/data/heroes';
   import {
     getSelectedFpsHero,
+    setSelectedFpsHero,
+    getSelectedFpsMap,
+    setSelectedFpsMap,
+    MOBA_MAPS,
+    type MobaMapId,
     getMouseSensitivity,
-    setMouseSensitivity
+    setMouseSensitivity,
+    getHandDistanceOffset,
+    setHandDistanceOffset,
+    getAiAttackingEnabled,
+    setAiAttackingEnabled
   } from '$lib/games/fps-moba/storage';
   import {
+    type FpsHeroDef,
     type FpsHudState,
     type FpsAbilityKey,
     CE_EXHAUSTION_LOCKOUT_SEC
@@ -17,15 +28,39 @@
   let engine: FpsMobaEngine | null = null;
   let hud = $state<FpsHudState | null>(null);
   let sensitivity = $state<number>(1.0);
+  let handDistance = $state<number>(0);
+  let aiAttacking = $state<boolean>(true);
+  let activeHero = $state<FpsHeroDef>(FPS_MOBA_HEROES[0]);
+  let activeMapId = $state<MobaMapId>('orlando');
 
   const abilityKeys: FpsAbilityKey[] = ['SHIFT', 'E', 'Q'];
 
   function startMatch() {
     engine?.destroy();
-    const hero = getSelectedFpsHero();
-    engine = new FpsMobaEngine(container, hero, (state) => {
-      hud = state;
-    });
+    activeHero = getSelectedFpsHero();
+    activeMapId = getSelectedFpsMap();
+    engine = new FpsMobaEngine(
+      container,
+      activeHero,
+      (state) => {
+        hud = state;
+      },
+      activeMapId
+    );
+  }
+
+  function switchHero(hero: FpsHeroDef) {
+    activeHero = hero;
+    setSelectedFpsHero(hero.id);
+    startMatch();
+    setTimeout(() => lockPointer(), 60);
+  }
+
+  function switchMap(mapId: MobaMapId) {
+    activeMapId = mapId;
+    setSelectedFpsMap(mapId);
+    startMatch();
+    setTimeout(() => lockPointer(), 60);
   }
 
   function onSensChange(e: Event) {
@@ -34,8 +69,23 @@
     setMouseSensitivity(val);
   }
 
+  function onHandDistanceChange(e: Event) {
+    const val = parseFloat((e.target as HTMLInputElement).value);
+    handDistance = val;
+    setHandDistanceOffset(val);
+    engine?.setHandDistanceOffset(val);
+  }
+
+  function toggleAiAttacking() {
+    aiAttacking = !aiAttacking;
+    setAiAttackingEnabled(aiAttacking);
+    engine?.setAiAttackingEnabled(aiAttacking);
+  }
+
   onMount(() => {
     sensitivity = getMouseSensitivity();
+    handDistance = getHandDistanceOffset();
+    aiAttacking = getAiAttackingEnabled();
     startMatch();
     return () => {
       engine?.destroy();
@@ -77,6 +127,16 @@
         mask-image: radial-gradient(ellipse 46% 52% at 50% 50%, rgba(0,0,0,0.95) 25%, rgba(0,0,0,0.45) 68%, transparent 95%);
         -webkit-mask-image: radial-gradient(ellipse 46% 52% at 50% 50%, rgba(0,0,0,0.95) 25%, rgba(0,0,0,0.45) 68%, transparent 95%);
         background: radial-gradient(ellipse 46% 52% at 50% 50%, rgba(125, 211, 252, 0.08), rgba(192, 132, 252, 0.05) 60%, transparent 92%);
+      "
+    ></div>
+  {/if}
+
+  <!-- Megumi Shadow Step Submerged Vignette -->
+  {#if hud.isShadowStepping}
+    <div
+      class="fixed inset-0 pointer-events-none z-10 transition-opacity duration-150"
+      style="
+        background: radial-gradient(ellipse 65% 65% at 50% 50%, rgba(15, 23, 42, 0.12) 20%, rgba(30, 27, 75, 0.72) 85%, rgba(2, 6, 23, 0.92) 100%);
       "
     ></div>
   {/if}
@@ -168,6 +228,66 @@
       {#if hud.canCastHollowPurple}
         <div class="mt-4 px-3.5 py-1 rounded-full bg-purple-500/30 border border-purple-400 font-['Share_Tech_Mono'] text-[10px] font-bold text-purple-200 shadow-[0_0_20px_rgba(168,85,247,0.5)] animate-pulse">
           [Q] HOLLOW PURPLE READY (RED + BLUE · 1-HIT KILL · ENDS DOMAIN)
+        </div>
+      {/if}
+
+      <!-- Jogo Domain-Only Maximum: Meteor Prompt -->
+      {#if hud.meteorAiming}
+        <div class="mt-6 px-3.5 py-1 rounded-full bg-orange-500/35 border border-amber-300 font-['Share_Tech_Mono'] text-[10px] font-bold text-amber-100 shadow-[0_0_24px_rgba(249,115,22,0.7)] animate-pulse">
+          [RELEASE Q] DROP MAXIMUM: METEOR ON MARKED SPOT
+        </div>
+      {:else if hud.canCastMeteor}
+        <div class="mt-4 px-3.5 py-1 rounded-full bg-orange-600/30 border border-orange-400 font-['Share_Tech_Mono'] text-[10px] font-bold text-amber-200 shadow-[0_0_20px_rgba(249,115,22,0.5)] animate-pulse">
+          [HOLD Q] AIM MAXIMUM: METEOR · RELEASE TO DROP (ENDS DOMAIN)
+        </div>
+      {/if}
+
+      <!-- Megumi Shadow Step, Rabbit Escape -> Nue Carry Flight, Toad Ally Lock, Mahoraga Domain Finisher & Rogue Alert -->
+      {#if (hud.nueCarryRemainingSec ?? 0) > 0}
+        <div class="mt-6 w-44 bg-black/80 border border-sky-400/70 rounded-full p-1">
+          <div
+            class="h-2.5 rounded-full bg-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.8)]"
+            style="width: {((hud.nueCarryRemainingSec ?? 0) / 2.0) * 100}%;"
+          ></div>
+          <div class="text-center font-['Share_Tech_Mono'] text-[10px] font-bold text-sky-200 mt-0.5">
+            NUE FLIGHT · {hud.nueCarryRemainingSec}s [HOLD SPACE]
+          </div>
+        </div>
+      {:else if hud.canNueCarry}
+        <div class="mt-6 px-3.5 py-1 rounded-full bg-sky-500/30 border border-sky-300 font-['Share_Tech_Mono'] text-[10px] font-bold text-sky-100 shadow-[0_0_18px_rgba(56,189,248,0.55)] animate-pulse">
+          [HOLD SPACE] NUE FLIGHT CARRY (2.0s)
+        </div>
+      {/if}
+      {#if hud.isShadowStepping}
+        <div class="mt-6 px-3.5 py-1 rounded-full bg-indigo-950/80 border border-indigo-400 font-['Share_Tech_Mono'] text-[10px] font-bold text-indigo-200 shadow-[0_0_20px_rgba(99,102,241,0.55)] animate-pulse">
+          SHADOW STEP · UNDETECTED ({hud.shadowStepRemainingSec}s) · [SHIFT] TO EMERGE
+        </div>
+      {/if}
+      {#if hud.nueToadPreview === 'TOAD'}
+        <div class="mt-4 px-3 py-0.5 rounded-full bg-pink-500/25 border border-pink-400 font-['Share_Tech_Mono'] text-[10px] font-bold text-pink-200">
+          [E] TOAD RESCUE LOCKED ON ALLY
+        </div>
+      {/if}
+      {#if hud.canSummonMahoraga}
+        <div class="mt-4 px-3.5 py-1 rounded-full bg-amber-500/30 border border-amber-300 font-['Share_Tech_Mono'] text-[10px] font-bold text-amber-100 shadow-[0_0_22px_rgba(250,204,21,0.55)] animate-pulse">
+          [Q] SUMMON MAHORAGA (ADAPTIVE TITAN · ENDS DOMAIN)
+        </div>
+      {/if}
+      {#if hud.mahoragaRogue}
+        <div class="mt-4 px-3.5 py-1 rounded-full bg-red-600/35 border border-red-400 font-['Share_Tech_Mono'] text-[10px] font-bold text-red-100 shadow-[0_0_22px_rgba(239,68,68,0.65)] animate-pulse">
+          ⚠ MAHORAGA HAS TURNED ON YOUR TEAM!
+        </div>
+      {/if}
+
+      <!-- Uro Takako Surface of the Sky Hover & Domain Finisher -->
+      {#if hud.isSkyHovering}
+        <div class="mt-6 px-3.5 py-1 rounded-full bg-cyan-500/25 border border-cyan-300 font-['Share_Tech_Mono'] text-[10px] font-bold text-cyan-100 shadow-[0_0_18px_rgba(103,232,249,0.55)]">
+          SURFACE OF THE SKY · GLIDING [HOLD SPACE]
+        </div>
+      {/if}
+      {#if hud.canCastShatteredSky}
+        <div class="mt-4 px-3.5 py-1 rounded-full bg-cyan-500/30 border border-cyan-300 font-['Share_Tech_Mono'] text-[10px] font-bold text-cyan-100 shadow-[0_0_22px_rgba(103,232,249,0.6)] animate-pulse">
+          [Q] MAXIMUM: SHATTERED SKY (THIN ICE CATACLYSM · ENDS DOMAIN)
         </div>
       {/if}
 
@@ -267,14 +387,25 @@
 
   <!-- ── 4. TOP-LEFT TACTICAL LANE MINIMAP ── -->
   <div class="fixed top-4 left-4 z-30 bg-slate-950/85 border border-white/15 rounded-2xl p-3 backdrop-blur-md pointer-events-none">
-    <div class="font-['Share_Tech_Mono'] text-[10px] tracking-widest text-slate-400 uppercase mb-1.5 flex justify-between">
-      <span>TACTICAL RADAR</span>
+    <div class="font-['Share_Tech_Mono'] text-[10px] tracking-widest text-slate-400 uppercase mb-1.5 flex justify-between items-center gap-2">
+      <span class="text-amber-300 font-bold">{hud.mapName ?? 'RADAR'}</span>
       <span class="text-emerald-400">LVL {hud.level} · {hud.gold}G</span>
     </div>
     <div class="relative w-32 h-48 bg-slate-900/90 border border-white/10 rounded-lg overflow-hidden">
       <!-- Center line -->
       <div class="absolute inset-x-0 top-1/2 h-[1px] bg-white/10"></div>
       <div class="absolute inset-y-2 left-1/2 w-2 -translate-x-1/2 bg-white/5"></div>
+
+      <!-- WhirlyDome Marker (Orlando) -->
+      {#if hud.mapId === 'orlando'}
+        <div
+          class="absolute w-5 h-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-amber-400/60 bg-amber-500/25 flex items-center justify-center text-[7px] text-amber-200 font-bold"
+          style="left: 76%; top: 50%;"
+          title="WhirlyDome"
+        >
+          WD
+        </div>
+      {/if}
 
       <!-- Units & Towers -->
       {#each hud.minimapBlips as blip (blip.id)}
@@ -285,8 +416,8 @@
           style="
             left: {mx}%;
             top: {my}%;
-            width: {blip.type === 'CORE' ? '10px' : blip.type === 'TOWER' || blip.type === 'HERO' ? '7px' : '4px'};
-            height: {blip.type === 'CORE' ? '10px' : blip.type === 'TOWER' || blip.type === 'HERO' ? '7px' : '4px'};
+            width: {blip.type === 'CORE' ? '10px' : blip.type === 'TOWER' || blip.type === 'HERO' ? '7px' : blip.type === 'SHIKIGAMI' ? '6px' : '4px'};
+            height: {blip.type === 'CORE' ? '10px' : blip.type === 'TOWER' || blip.type === 'HERO' ? '7px' : blip.type === 'SHIKIGAMI' ? '6px' : '4px'};
             background: {blip.team === 'blue' ? '#38bdf8' : '#f43f5e'};
             box-shadow: 0 0 6px {blip.team === 'blue' ? '#38bdf8' : '#f43f5e'};
           "
@@ -390,13 +521,29 @@
         {@const ab = hud.hero.abilities[key]}
         {@const cd = hud.cooldowns[key]}
         {@const isPurpleOverride = key === 'Q' && Boolean(hud.canCastHollowPurple)}
-        {@const onCooldown = !isPurpleOverride && cd.remainingMs > 0}
+        {@const isMeteorOverride = key === 'Q' && Boolean(hud.canCastMeteor)}
+        {@const isMahoragaOverride = key === 'Q' && Boolean(hud.canSummonMahoraga)}
+        {@const isShatteredSkyOverride = key === 'Q' && Boolean(hud.canCastShatteredSky)}
+        {@const isDomainFinisher =
+          isPurpleOverride || isMeteorOverride || isMahoragaOverride || isShatteredSkyOverride}
+        {@const hasCharges = Boolean(cd.maxCharges && cd.maxCharges > 1)}
+        {@const currentCharges = cd.charges ?? cd.maxCharges ?? 1}
+        {@const onCooldown = !isDomainFinisher && (hasCharges ? currentCharges <= 0 : cd.remainingMs > 0)}
+        {@const isRechargingCharge = hasCharges && currentCharges < (cd.maxCharges ?? 1) && cd.remainingMs > 0}
         {@const noMana =
           hud.manaExhaustedTimerSec > 0 ||
           hud.mana <= 0 ||
-          (!isPurpleOverride && hud.mana < ab.manaCost) ||
-          (isPurpleOverride && hud.mana < 35)}
-        {@const cardColor = isPurpleOverride ? '#a855f7' : ab.color}
+          (!isDomainFinisher && hud.mana < ab.manaCost) ||
+          (isDomainFinisher && hud.mana < 35)}
+        {@const cardColor = isPurpleOverride
+          ? '#a855f7'
+          : isMeteorOverride
+            ? '#f97316'
+            : isMahoragaOverride
+              ? '#facc15'
+              : isShatteredSkyOverride
+                ? '#67e8f9'
+                : ab.color}
         <div
           class="relative w-22 h-20 rounded-xl border flex flex-col items-center justify-between p-2 overflow-hidden {onCooldown || noMana
             ? 'border-white/10 bg-slate-900/80 opacity-60'
@@ -404,12 +551,37 @@
           style={!onCooldown && !noMana ? `border-color: ${cardColor}; box-shadow: 0 0 15px ${cardColor}44;` : ''}
         >
           <div class="w-full flex justify-between font-['Share_Tech_Mono'] text-[10px]">
-            <span class="font-bold {isPurpleOverride ? 'text-purple-300' : key === 'Q' ? 'text-amber-300' : 'text-white'}">[{key}]</span>
-            <span class="{noMana ? 'text-rose-400' : 'text-sky-300'}">{isPurpleOverride ? '35' : ab.manaDrainPerSec ? `${ab.manaDrainPerSec}/s` : ab.manaCost}</span>
+            <span class="font-bold {isPurpleOverride ? 'text-purple-300' : isMeteorOverride ? 'text-orange-300' : isMahoragaOverride ? 'text-amber-300' : isShatteredSkyOverride ? 'text-cyan-300' : key === 'Q' ? 'text-amber-300' : 'text-white'}">[{key}]</span>
+            <span class="{noMana ? 'text-rose-400' : 'text-sky-300'}">{isDomainFinisher ? '35' : ab.manaDrainPerSec ? `${ab.manaDrainPerSec}/s` : ab.manaCost}</span>
           </div>
-          <div class="text-[11px] font-bold text-center {isPurpleOverride ? 'text-purple-200' : 'text-white'} leading-tight line-clamp-2">
-            {isPurpleOverride ? 'Hollow Purple' : ab.name}
+          <div class="text-[11px] font-bold text-center {isPurpleOverride ? 'text-purple-200' : isMeteorOverride || isMahoragaOverride ? 'text-amber-200' : isShatteredSkyOverride ? 'text-cyan-200' : 'text-white'} leading-tight line-clamp-2">
+            {isPurpleOverride
+              ? 'Hollow Purple'
+              : isMeteorOverride
+                ? 'Maximum: Meteor'
+                : isMahoragaOverride
+                  ? 'Mahoraga'
+                  : isShatteredSkyOverride
+                    ? 'Shattered Sky'
+                    : key === 'E' && hud.nueToadPreview === 'TOAD'
+                      ? 'Toad Rescue'
+                      : ab.name}
           </div>
+          {#if hasCharges}
+            <div class="w-full flex items-center justify-between font-['Share_Tech_Mono'] text-[9px] pt-0.5">
+              <div class="flex items-center gap-1">
+                {#each Array(cd.maxCharges ?? 1) as _, idx}
+                  <span
+                    class="w-2 h-2 rounded-full"
+                    style="background: {idx < currentCharges ? cardColor : 'rgba(255,255,255,0.18)'};"
+                  ></span>
+                {/each}
+              </div>
+              <span class="text-slate-300">
+                {isRechargingCharge ? `${(cd.remainingMs / 1000).toFixed(1)}s` : `${currentCharges}/${cd.maxCharges}`}
+              </span>
+            </div>
+          {/if}
           {#if onCooldown}
             <div class="absolute inset-0 bg-black/75 flex items-center justify-center font-['Share_Tech_Mono'] text-sm font-bold text-white">
               {(cd.remainingMs / 1000).toFixed(1)}s
@@ -441,18 +613,20 @@
       {/if}
 
       <!-- Secondary Fire (Right Click / M2) Status -->
-      <div class="mt-2 pt-2 border-t border-white/10 flex items-center justify-between text-[11px]">
-        <span class="text-sky-300">[M2] {hud.hero.secondaryFire.name.split('[')[0]}</span>
-        {#if hud.hasActiveBlueOrb}
-          <span class="text-sky-300 font-bold animate-pulse">ATTRACT [M2]</span>
-        {:else if hud.secondaryCooldownMs > 0}
-          <span class="text-rose-400 font-bold">{(hud.secondaryCooldownMs / 1000).toFixed(1)}s CD</span>
-        {:else if hud.hero.secondaryFire.kind === 'BARRIER_SHIELD' && hud.barrierMaxHp > 0}
-          <span class="text-white font-bold">{hud.barrierHp} / {hud.barrierMaxHp}</span>
-        {:else}
-          <span class="text-emerald-400 font-bold">READY</span>
-        {/if}
-      </div>
+      {#if hud.hero.secondaryFire.kind !== 'NONE'}
+        <div class="mt-2 pt-2 border-t border-white/10 flex items-center justify-between text-[11px]">
+          <span class="text-sky-300">[M2] {hud.hero.secondaryFire.name.split('[')[0]}</span>
+          {#if hud.hasActiveBlueOrb}
+            <span class="text-sky-300 font-bold animate-pulse">ATTRACT [M2]</span>
+          {:else if hud.secondaryCooldownMs > 0}
+            <span class="text-rose-400 font-bold">{(hud.secondaryCooldownMs / 1000).toFixed(1)}s CD</span>
+          {:else if (hud.hero.secondaryFire.kind === 'BARRIER_SHIELD' || hud.hero.secondaryFire.kind === 'SKY_DEFLECT') && hud.barrierMaxHp > 0}
+            <span class="text-white font-bold">{hud.barrierHp} / {hud.barrierMaxHp}</span>
+          {:else}
+            <span class="text-emerald-400 font-bold">READY</span>
+          {/if}
+        </div>
+      {/if}
       <div class="text-[10px] text-slate-500 mt-1">[R] RELOAD · [V] QUICK MELEE · [ESC] MENU</div>
     </div>
   </div>
@@ -471,18 +645,94 @@
           Destroy the Enemy Outer Tower, Base Tower, and Ancient Core down the lane while defending your own.
         </p>
 
-        <!-- Sensitivity slider inside ESC menu -->
-        <div class="bg-black/40 border border-white/10 rounded-xl p-3.5 mb-5 flex items-center justify-between font-['Share_Tech_Mono'] text-xs">
-          <span class="text-slate-300">MOUSE SENSITIVITY: {sensitivity.toFixed(1)}x</span>
-          <input
-            type="range"
-            min="0.3"
-            max="2.5"
-            step="0.1"
-            value={sensitivity}
-            oninput={onSensChange}
-            class="w-28 accent-emerald-400 cursor-pointer"
-          />
+        <!-- Arena & Camera Options inside ESC menu -->
+        <div class="bg-black/40 border border-white/10 rounded-xl p-3 mb-4 space-y-2.5 font-['Share_Tech_Mono'] text-xs">
+          <div class="flex items-center justify-between">
+            <span class="text-slate-300">MOUSE SENS: {sensitivity.toFixed(1)}x</span>
+            <input
+              type="range"
+              min="0.3"
+              max="2.5"
+              step="0.1"
+              value={sensitivity}
+              oninput={onSensChange}
+              class="w-28 accent-emerald-400 cursor-pointer"
+            />
+          </div>
+
+          <div class="flex items-center justify-between">
+            <span class="text-slate-300">
+              HAND DIST: {handDistance === 0 ? 'STD' : `${handDistance > 0 ? '+' : ''}${Math.round(handDistance * 100)}cm`}
+            </span>
+            <input
+              type="range"
+              min="-0.16"
+              max="0.35"
+              step="0.01"
+              value={handDistance}
+              oninput={onHandDistanceChange}
+              class="w-28 accent-sky-400 cursor-pointer"
+            />
+          </div>
+
+          <div class="flex items-center justify-between pt-0.5 border-t border-white/10">
+            <span class="text-slate-300">AI ATTACKING</span>
+            <button
+              onclick={toggleAiAttacking}
+              class="px-3 py-1 rounded-lg border text-[11px] font-bold transition-all cursor-pointer {aiAttacking
+                ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300'
+                : 'bg-rose-500/20 border-rose-400/70 text-rose-300'}"
+            >
+              {aiAttacking ? 'ON' : 'OFF (PASSIVE)'}
+            </button>
+          </div>
+        </div>
+
+        <!-- Operative & Map Switcher inside ESC menu -->
+        <div class="bg-black/50 border border-white/10 rounded-2xl p-4 mb-5 text-left space-y-3">
+          <div>
+            <div class="font-['Share_Tech_Mono'] text-[10px] text-slate-400 uppercase tracking-widest mb-1.5 flex justify-between">
+              <span>SELECT OPERATIVE</span>
+              <span class="text-sky-300 font-bold">{activeHero.name}</span>
+            </div>
+            <div class="grid grid-cols-4 gap-1.5">
+              {#each FPS_MOBA_HEROES as h}
+                {@const isCurrentHero = activeHero.id === h.id}
+                <button
+                  onclick={() => switchHero(h)}
+                  class="py-1.5 px-2 rounded-lg border text-[11px] font-['Share_Tech_Mono'] truncate transition-all cursor-pointer {isCurrentHero
+                    ? 'bg-sky-500/25 border-sky-400 text-white font-bold shadow-[0_0_10px_rgba(56,189,248,0.3)]'
+                    : 'bg-white/5 border-white/10 text-slate-400 hover:text-white hover:border-white/20'}"
+                  style={isCurrentHero ? `color: ${h.accentColor};` : ''}
+                >
+                  {h.name}
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div>
+            <div class="font-['Share_Tech_Mono'] text-[10px] text-slate-400 uppercase tracking-widest mb-1.5 flex justify-between">
+              <span>SELECT MAP</span>
+              <span class="text-amber-300 font-bold">
+                {MOBA_MAPS.find((m) => m.id === activeMapId)?.name.toUpperCase()}
+              </span>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              {#each MOBA_MAPS as m}
+                {@const isCurrentMap = activeMapId === m.id}
+                <button
+                  onclick={() => switchMap(m.id)}
+                  class="py-2 px-3 rounded-xl border text-left font-['Share_Tech_Mono'] transition-all cursor-pointer {isCurrentMap
+                    ? 'bg-amber-500/25 border-amber-400 text-white shadow-[0_0_12px_rgba(245,158,11,0.25)]'
+                    : 'bg-white/5 border-white/10 text-slate-400 hover:text-white hover:border-white/20'}"
+                >
+                  <div class="text-xs font-bold" style="color: {m.accentColor};">{m.name}</div>
+                  <div class="text-[9px] text-slate-400">{m.subtitle}</div>
+                </button>
+              {/each}
+            </div>
+          </div>
         </div>
 
         <div class="space-y-2.5">

@@ -24,7 +24,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       fireMode: 'MELEE_CLEAVE',
       viewModelType: 'HAMMER',
       damage: 65,
-      manaCost: 6,
+      manaCost: 0,
       fireRateMs: 600,
       range: 6.5,
       cleaveArcDeg: 125,
@@ -113,8 +113,8 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       maxManaCost: 34,
       fireRateMs: 420,
       range: 95,
-      knockback: 6.5,
-      maxKnockback: 14.5,
+      knockback: 2.0,
+      maxKnockback: 18.0,
       chargeable: true,
       maxChargeMs: 900,
       isProjectileOrb: true,
@@ -126,7 +126,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       name: 'Lapse Blue [Right Click]',
       kind: 'LAPSE_BLUE_ORB',
       description:
-        '1st Right Click (28 CE): Launch a Lapse Blue singularity orb forward. 2nd Right Click (10 CE): Attract anyone within a 3m radius into the orb.',
+        '1st Right Click (28 CE): Launch a Lapse Blue singularity orb forward. 2nd Right Click (Free): Attract anyone within radius into the orb.',
       manaCost: 28,
       maxDamage: 65,
       barrierMaxHp: 140,
@@ -180,327 +180,169 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
   },
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 2. DOOM — Doomfist-style Combo Dive Brawler
+  // 3. JOGO — Disaster Flame Curse (Volcanic Zone Control Mage)
   // ─────────────────────────────────────────────────────────────────────────
   {
-    id: 'doom',
-    name: 'Doom',
-    role: 'BRAWLER',
-    archetypeLabel: 'MELEE COMBO DIVE (DOOMFIST STYLE)',
-    epithet: 'Fist of the Cataclysm',
-    passiveName: 'The Best Defense',
-    passiveDesc: 'Dealing damage with abilities generates +35 temporary Overhealth shields (up to +200).',
-    color: '#ef4444',
-    accentColor: '#fca5a5',
-    maxHp: 340,
-    maxMana: 100,
-    ceRegenMultiplier: 0.95,
-    moveSpeed: 14.2,
-    weapon: {
-      name: 'Knuckle Hand Cannon',
-      fireMode: 'HAND_CANNON',
-      viewModelType: 'DOOM_GAUNTLET',
-      damage: 11,
-      manaCost: 5,
-      pellets: 6,
-      spread: 0.045,
-      fireRateMs: 320,
-      range: 38,
-      magazineSize: 4,
-      reloadTimeMs: 650,
-      autoRegenAmmo: true,
-      projectileColor: '#f87171'
-    },
-    secondaryFire: {
-      name: 'Rocket Punch [Hold & Release Right Click]',
-      kind: 'CHARGED_PUNCH',
-      description: 'Hold Right Click to charge your Gauntlet, then release to lunge forward and punch enemies back. Enemies slammed into walls take +65 bonus Wall-Slam damage!',
-      manaCost: 22,
-      minDamage: 45,
-      maxDamage: 95,
-      wallSlamBonusDamage: 65,
-      maxChargeMs: 1000,
-      cooldownMs: 3800,
-      color: '#ef4444'
-    },
-    abilities: {
-      SHIFT: {
-        key: 'SHIFT',
-        name: 'Seismic Slam',
-        description: 'Leap forward in a 3D arc and smash the ground, pulling and damaging enemies in a frontal shockwave cone.',
-        cooldownMs: 5500,
-        manaCost: 15,
-        kind: 'SEISMIC_SLAM',
-        damage: 55,
-        radius: 8.5,
-        durationMs: 600,
-        color: '#ef4444'
-      },
-      E: {
-        key: 'E',
-        name: 'Rising Uppercut',
-        description: 'Uppercut enemies in front of you high into the air while launching yourself upward for aerial combos.',
-        cooldownMs: 6000,
-        manaCost: 20,
-        kind: 'RISING_UPPERCUT',
-        damage: 50,
-        radius: 5.5,
-        durationMs: 600,
-        color: '#fb7185'
-      },
-      Q: {
-        key: 'Q',
-        name: 'Meteor Strike',
-        description: 'Vault high into the air and crash down in a massive 3D shockwave crater, dealing heavy damage and generating full Overhealth.',
-        cooldownMs: 22000,
-        manaCost: 50,
-        kind: 'METEOR_STRIKE_ULT',
-        damage: 155,
-        radius: 12.0,
-        durationMs: 1500,
-        color: '#ef4444'
-      }
-    }
-  },
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // 3. BRIGID — Brigitte-style Melee Flail Support-Brawler
-  // ─────────────────────────────────────────────────────────────────────────
-  {
-    id: 'brigid',
-    name: 'Brigid',
-    role: 'SUPPORT_BRIG',
-    archetypeLabel: 'MELEE FLAIL PALADIN (BRIGITTE STYLE)',
-    epithet: 'Shieldmaiden of the Dawn',
-    passiveName: 'Inspire',
-    passiveDesc: 'Striking enemies with Rocket Flail or Whip Shot triggers a 5s healing pulse (+22 HP/s to you and nearby allied minions).',
-    color: '#eab308',
-    accentColor: '#fef08a',
-    maxHp: 280,
-    maxMana: 110,
-    ceRegenMultiplier: 1.15,
-    moveSpeed: 13.4,
-    weapon: {
-      name: 'Rocket Flail',
-      fireMode: 'MELEE_CLEAVE',
-      viewModelType: 'FLAIL',
-      damage: 40,
-      manaCost: 5,
-      fireRateMs: 420,
-      range: 6.0,
-      cleaveArcDeg: 115,
-      knockback: 4.5,
-      magazineSize: 0,
-      reloadTimeMs: 0,
-      projectileColor: '#eab308'
-    },
-    secondaryFire: {
-      name: 'Riot Barrier [Hold Right Click]',
-      kind: 'BARRIER_SHIELD',
-      description: 'Hold Right Click to deploy a 450 HP personal energy shield. Press Left Click while shielding to perform Shield Bash!',
-      manaDrainPerSec: 14,
-      barrierMaxHp: 450,
-      barrierRegenPerSec: 85,
-      color: '#facc15'
-    },
-    abilities: {
-      SHIFT: {
-        key: 'SHIFT',
-        name: 'Shield Bash',
-        description: 'Dash forward behind your Riot Barrier, bashing through enemies and knocking them back.',
-        cooldownMs: 4500,
-        manaCost: 15,
-        kind: 'SHIELD_BASH',
-        damage: 55,
-        radius: 4.5,
-        durationMs: 350,
-        color: '#facc15'
-      },
-      E: {
-        key: 'E',
-        name: 'Whip Shot',
-        description: 'Launch your Rocket Flail chain 22m forward, dealing 75 damage, triggering Inspire, and knocking the target far back.',
-        cooldownMs: 4500,
-        manaCost: 20,
-        kind: 'WHIP_SHOT',
-        damage: 75,
-        radius: 22.0,
-        durationMs: 400,
-        color: '#eab308'
-      },
-      Q: {
-        key: 'Q',
-        name: 'Rally!',
-        description: 'Expand a golden 3D Valkyrie banner aura for 8s that grants continuous Overhealth regeneration, +30% speed, and shockwaves!',
-        cooldownMs: 24000,
-        manaCost: 60,
-        kind: 'RALLY_ULT',
-        damage: 38,
-        radius: 16.0,
-        durationMs: 8000,
-        color: '#eab308'
-      }
-    }
-  },
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // 4. VEX — Soldier: 76 / Sojourn Hitscan Striker
-  // ─────────────────────────────────────────────────────────────────────────
-  {
-    id: 'vex',
-    name: 'Vex',
-    role: 'STRIKER',
-    archetypeLabel: 'HITSCAN RIFLE STRIKER (SOLDIER / SOJOURN STYLE)',
-    epithet: 'Architect of the Null Vector',
-    passiveName: 'Overclocked Targeting',
-    passiveDesc: 'Critical headshots deal 1.6× damage and restore 4 Cursed Energy.',
-    color: '#10b981',
-    accentColor: '#6ee7b7',
-    maxHp: 220,
-    maxMana: 120,
-    ceRegenMultiplier: 1.0,
+    id: 'jogo',
+    name: 'Jogo',
+    role: 'MAGE',
+    archetypeLabel: 'DISASTER FLAME CURSE (VOLCANIC CONTROL MAGE)',
+    epithet: 'Special Grade Disaster Curse of the Earth',
+    passiveName: 'Disaster Flames',
+    passiveDesc:
+      'Born from humanity\'s fear of the earth. Landing volcanic abilities restores +15 Overhealth and +8 Cursed Energy.',
+    color: '#f97316',
+    accentColor: '#fde047',
+    maxHp: 270,
+    maxMana: 130,
+    ceRegenMultiplier: 1.25,
     moveSpeed: 13.8,
     weapon: {
-      name: 'Null Vector Pulse Rifle',
-      fireMode: 'AUTO',
-      viewModelType: 'RIFLE',
-      damage: 18,
-      manaCost: 3,
-      fireRateMs: 120,
-      range: 95,
-      magazineSize: 28,
-      reloadTimeMs: 1250,
-      projectileColor: '#10b981'
+      name: 'Ember Insects',
+      fireMode: 'EMBER_INSECTS',
+      viewModelType: 'JOGO_HANDS',
+      damage: 34,
+      manaCost: 10,
+      fireRateMs: 420,
+      range: 55,
+      magazineSize: 10,
+      reloadTimeMs: 1100,
+      projectileColor: '#f97316'
     },
     secondaryFire: {
-      name: 'Helix Rail Shot [Right Click]',
-      kind: 'HELIX_ROCKET',
-      description: 'Fire a high-velocity rail burst that explodes on impact for 75 AoE damage.',
-      manaCost: 24,
-      maxDamage: 75,
-      cooldownMs: 5500,
-      color: '#34d399'
+      name: 'Unassigned',
+      kind: 'NONE',
+      description: 'No secondary fire — channel cursed flames through Ember Insects, Mini Volcanoes, and Coffin of the Iron Mountain.',
+      color: '#f97316'
     },
     abilities: {
       SHIFT: {
         key: 'SHIFT',
-        name: 'Phase Blink',
-        description: 'Warp instantaneously in your look direction, leaving a 3D spatial rift.',
-        cooldownMs: 4500,
-        manaCost: 20,
-        kind: 'BLINK_DASH',
-        damage: 25,
-        radius: 4.5,
-        durationMs: 350,
-        color: '#10b981'
+        name: 'Flame Dash',
+        description:
+          'Burst rapidly in your movement direction on a jet of cursed flames. Holds 2 charges; each charge recharges in 4.0s.',
+        cooldownMs: 4000,
+        maxCharges: 2,
+        manaCost: 14,
+        kind: 'FLAME_DASH',
+        damage: 0,
+        radius: 0,
+        durationMs: 220,
+        color: '#f97316'
       },
       E: {
         key: 'E',
-        name: 'Disruptor Singularity',
-        description: 'Launch a 3D gravity sphere that pulls nearby enemies inward before detonating.',
-        cooldownMs: 8500,
-        manaCost: 35,
-        kind: 'GRAVITY_ORB',
-        damage: 58,
-        radius: 7.5,
-        durationMs: 2400,
-        color: '#34d399'
+        name: 'Mini Volcano',
+        description:
+          'Launch a volcanic vent that sticks to walls or floors and fires magma bolts at enemies within its 180° frontal arc.',
+        cooldownMs: 6500,
+        manaCost: 22,
+        kind: 'MINI_VOLCANO',
+        damage: 24,
+        radius: 16.0,
+        durationMs: 12000,
+        color: '#ea580c'
       },
       Q: {
         key: 'Q',
-        name: 'Domain: Tactical Horizon',
-        description: 'Expand a 3D Domain dome around you for 8s. Grants infinite ammo, +40% fire rate, and calls down sure-hit void lightning.',
-        cooldownMs: 25000,
-        manaCost: 65,
+        name: 'Domain Expansion: Coffin of the Iron Mountain',
+        description:
+          'Manifest the scorching center of the earth (19m barrier). All trapped enemies burn for -20 HP/sec. Hold [Q] inside to aim and release to drop Maximum: Meteor from above (ends Domain).',
+        cooldownMs: 24000,
+        manaCost: 75,
         kind: 'DOMAIN_ULT',
-        damage: 38,
-        radius: 18.0,
-        durationMs: 8000,
-        color: '#10b981'
+        damage: 20,
+        radius: 19.0,
+        durationMs: 12000,
+        color: '#ea580c'
       }
     }
   },
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 5. KAEL — Aerial Artillery Mage (Pharah / Echo Style)
+  // 4. MEGUMI FUSHIGURO — Ten Shadows Technique (Melee Summoner / Utility)
   // ─────────────────────────────────────────────────────────────────────────
   {
-    id: 'kael',
-    name: 'Kael',
-    role: 'MAGE',
-    archetypeLabel: 'AERIAL ARTILLERY MAGE (PHARAH / ECHO STYLE)',
-    epithet: 'Sovereign of Cinders',
-    passiveName: 'Thermal Draft',
-    passiveDesc: 'Abilities scorch targets and grant brief aerial lift.',
-    color: '#a855f7',
-    accentColor: '#d8b4fe',
-    maxHp: 210,
-    maxMana: 140,
+    id: 'megumi',
+    name: 'Megumi',
+    role: 'BRAWLER',
+    archetypeLabel: 'TEN SHADOWS MELEE (SUMMONER / UTILITY)',
+    epithet: 'Inheritor of the Ten Shadows',
+    passiveName: 'Shadow Storage',
+    passiveDesc:
+      'Sinking into shadows restores Overhealth & resets weapon flow; Shikigami takedowns restore +12 Cursed Energy and +15 Overhealth.',
+    color: '#6366f1',
+    accentColor: '#a5b4fc',
+    maxHp: 290,
+    maxMana: 135,
     ceRegenMultiplier: 1.25,
-    moveSpeed: 13.0,
+    moveSpeed: 14.0,
     weapon: {
-      name: 'Voidfire Launcher',
-      fireMode: 'BURST',
-      viewModelType: 'RIFLE',
-      damage: 36,
-      manaCost: 6,
-      fireRateMs: 280,
-      range: 105,
-      magazineSize: 16,
-      reloadTimeMs: 1350,
-      projectileColor: '#a855f7'
+      name: 'Cursed-Tool Broadsword',
+      fireMode: 'MELEE_CLEAVE',
+      viewModelType: 'MEGUMI_SHADOW',
+      damage: 54,
+      manaCost: 0,
+      fireRateMs: 460,
+      range: 5.5,
+      cleaveArcDeg: 120,
+      knockback: 5.5,
+      magazineSize: 0,
+      reloadTimeMs: 0,
+      projectileColor: '#6366f1'
     },
     secondaryFire: {
-      name: 'Concussive Nova [Right Click]',
-      kind: 'HELIX_ROCKET',
-      description: 'Detonate a high-impact plasma burst at your crosshair target for 70 AoE damage.',
-      manaCost: 22,
-      maxDamage: 70,
-      cooldownMs: 5000,
-      color: '#c084fc'
+      name: 'Unassigned',
+      kind: 'NONE',
+      description:
+        'No secondary fire — wield the Cursed-Tool Broadsword and command Ten Shadows Shikigami through Shadow Step, Rabbit Escape / Nue, and Chimera Shadow Garden.',
+      color: '#6366f1'
     },
     abilities: {
       SHIFT: {
         key: 'SHIFT',
-        name: 'Jump Jet Surge',
-        description: 'Propels you skyward and forward, igniting enemies beneath you.',
-        cooldownMs: 5000,
-        manaCost: 20,
-        kind: 'METEOR_LEAP',
-        damage: 42,
-        radius: 6.0,
-        durationMs: 600,
-        color: '#a855f7'
+        name: 'Shadow Step',
+        description:
+          'Sink into the floor shadows for 2.4s to move undetected (+45% speed) and restore +25 Overhealth from shadow storage.',
+        cooldownMs: 6000,
+        manaCost: 18,
+        kind: 'SHADOW_STEP',
+        damage: 0,
+        radius: 2.5,
+        durationMs: 2400,
+        color: '#4f46e5'
       },
       E: {
         key: 'E',
-        name: 'Solar Flare Pillar',
-        description: 'Erupts a towering 3D pillar of plasma fire at your crosshair target.',
-        cooldownMs: 7000,
-        manaCost: 35,
-        kind: 'SOLAR_PILLAR',
-        damage: 68,
-        radius: 5.5,
-        durationMs: 2500,
-        color: '#c084fc'
+        name: 'Rabbit Escape / Nue',
+        description:
+          'Unleash a swarming flood of white Shikigami rabbits and launch Megumi high into the air! Hold [SPACE] midair to have Nue carry you in any direction for 2.0s.',
+        cooldownMs: 6500,
+        manaCost: 22,
+        kind: 'RABBIT_ESCAPE_NUE',
+        damage: 8,
+        radius: 6.0,
+        durationMs: 7500,
+        color: '#38bdf8'
       },
       Q: {
         key: 'Q',
-        name: 'Domain: Shrine of Cinders',
-        description: 'Manifest an infernal 3D Domain dome that rains continuous plasma pillars on all enemies inside.',
-        cooldownMs: 26000,
-        manaCost: 70,
+        name: 'Domain Expansion: Chimera Shadow Garden',
+        description:
+          'Flood the ground with liquid shadow (19m) that sinks & heavily slows enemies while empowering multi-clone Shikigami. Press [Q] inside to summon Mahoraga (adapts to repeated moves; turns on your team if all enemies fall!).',
+        cooldownMs: 24000,
+        manaCost: 75,
         kind: 'DOMAIN_ULT',
-        damage: 42,
+        damage: 14,
         radius: 19.0,
-        durationMs: 8000,
-        color: '#a855f7'
+        durationMs: 12000,
+        color: '#4338ca'
       }
     }
   },
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 6. MR. BIOMASTER — Bio-Organic Mutagen Brawler
+  // 5. MR. BIOMASTER — Bio-Organic Mutagen Brawler
   // ─────────────────────────────────────────────────────────────────────────
   {
     id: 'mr_biomaster',
@@ -573,6 +415,92 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
         radius: 19.0,
         durationMs: 8000,
         color: '#22c55e'
+      }
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 6. URO TAKAKO — Sky Manipulation (Aerial Spatial Brawler & Deflector)
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    id: 'uro',
+    name: 'Uro Takako',
+    role: 'BRAWLER',
+    archetypeLabel: 'SKY MANIPULATION BRAWLER (AERIAL DEFLECT / SHATTER)',
+    epithet: 'Captain of the Sun, Moon, and Stars Squad',
+    passiveName: 'Surface of the Sky',
+    passiveDesc:
+      'Hold [SPACE] while airborne to float and glide effortlessly across the sky. Deflecting attacks or landing Thin Ice Breaker restores +20 Overhealth and +12 Cursed Energy.',
+    color: '#67e8f9',
+    accentColor: '#f0f9ff',
+    maxHp: 295,
+    maxMana: 135,
+    ceRegenMultiplier: 1.25,
+    moveSpeed: 14.2,
+    weapon: {
+      name: 'Sky-Warping Palm Strikes',
+      fireMode: 'MELEE_CLEAVE',
+      viewModelType: 'URO_SKY_HANDS',
+      damage: 50,
+      manaCost: 0, // Melee-based attacks require no Cursed Energy
+      fireRateMs: 420,
+      range: 6.2,
+      cleaveArcDeg: 120,
+      knockback: 6.5,
+      magazineSize: 0,
+      reloadTimeMs: 0,
+      projectileColor: '#67e8f9'
+    },
+    secondaryFire: {
+      name: 'Sky Veil Deflect [Hold Right Click]',
+      kind: 'SKY_DEFLECT',
+      description:
+        'Grab and pull the sky like a cloth in front of you, catching incoming projectiles and redirecting them right back toward your crosshair while absorbing direct hits.',
+      manaDrainPerSec: 22,
+      barrierMaxHp: 600,
+      barrierRegenPerSec: 110,
+      color: '#67e8f9'
+    },
+    abilities: {
+      SHIFT: {
+        key: 'SHIFT',
+        name: 'Sky Pull',
+        description:
+          'Grab the surface of the sky and yank yourself along your 3D look direction with buoyant aerial hang-time. Holds 2 charges (4.2s recharge each).',
+        cooldownMs: 4200,
+        maxCharges: 2,
+        manaCost: 14,
+        kind: 'SKY_PULL',
+        damage: 0,
+        radius: 0,
+        durationMs: 260,
+        color: '#38bdf8'
+      },
+      E: {
+        key: 'E',
+        name: 'Thin Ice Breaker',
+        description:
+          'Strike the surface of the sky itself to shatter space like thin ice in a 6.5m shockwave, piercing guards/shields and dealing 2× damage to Domain barriers.',
+        cooldownMs: 5500,
+        manaCost: 24,
+        kind: 'THIN_ICE_BREAKER',
+        damage: 115,
+        radius: 6.5,
+        durationMs: 700,
+        color: '#bae6fd'
+      },
+      Q: {
+        key: 'Q',
+        name: 'Domain Expansion: Sky Veil Horizon',
+        description:
+          'Wrap the sky inward into a luminous glass-mirror dome (20m) granting low-gravity aerial mastery and shearing trapped foes. Press [Q] inside to unleash Maximum: Shattered Sky (ends Domain).',
+        cooldownMs: 24000,
+        manaCost: 75,
+        kind: 'DOMAIN_ULT',
+        damage: 22,
+        radius: 20.0,
+        durationMs: 11000,
+        color: '#67e8f9'
       }
     }
   }

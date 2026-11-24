@@ -12,19 +12,24 @@ import {
   type FpsHudState,
   type KillFeedEntry,
   type MinimapBlip,
+  type MobaMapId,
   type MobaTeam,
   type MobaUnitType
 } from './types';
 import { MobaMapBuilder } from './world/MobaMapBuilder';
+import { PhysicsWorld } from './world/PhysicsWorld';
 import { FpsViewModel } from './entities/FpsViewModel';
 import { buildProceduralHeroModel, type HeroAnimHint } from './entities/ProceduralHeroBuilder';
 import {
   createCursedEnergyOrb,
+  createCursedExplosionParticles,
   createInfinityDistortionMaterial,
+  createSkyVeilDistortionMaterial,
+  createThinIceShatterEffect,
   createUnlimitedVoidDomainVfx,
   type UnlimitedVoidDomainController
 } from './vfx/CursedShaderVfx';
-import { getMouseSensitivity } from './storage';
+import { getAiAttackingEnabled, getHandDistanceOffset, getMouseSensitivity } from './storage';
 import { FPS_MOBA_HEROES } from './data/heroes';
 import {
   MobaEntity,
@@ -35,6 +40,28 @@ import {
   DomainBarrierEntity,
   type NpcAiState
 } from './entities/Entity';
+import {
+  ShikigamiEntity,
+  DivineDogShikigami,
+  RabbitEscapeShikigami,
+  ToadShikigami,
+  NueShikigami,
+  NueCarryShikigami,
+  MahoragaShikigami,
+  type ShikigamiContext
+} from './entities/Shikigami';
+import {
+  Projectile,
+  ReversalRedProjectile,
+  LapseBlueProjectile,
+  HollowPurpleProjectile,
+  EmberInsectProjectile,
+  VolcanoSeedProjectile,
+  FireBoltProjectile,
+  MaximumMeteorProjectile,
+  ShadowKunaiProjectile,
+  type ProjectileContext
+} from './entities/Projectile';
 import {
   DomainExpansion,
   UnlimitedVoidDomain,
@@ -93,6 +120,8 @@ export interface MobaUnit {
   respawnTimer?: number;
   spawnPos?: THREE.Vector3;
   stunTimer?: number;
+  verticalVel?: number;
+  pullActiveTimer?: number;
   knockbackVel?: THREE.Vector3;
 }
 
@@ -113,6 +142,7 @@ export class FpsMobaEngine {
   private scene!: THREE.Scene;
   private camera!: THREE.PerspectiveCamera;
   private mapBuilder!: MobaMapBuilder;
+  private physicsWorld!: PhysicsWorld;
   private viewModel!: FpsViewModel;
 
   // Player state (Blue Team)
@@ -124,6 +154,7 @@ export class FpsMobaEngine {
   private hp: number;
   private maxHp: number;
   private shield = 0;
+  private playerOutOfCombatTimer = 5.0;
   private mana: number;
   private maxMana: number;
   private manaExhaustedTimerSec = 0;
@@ -143,7 +174,8 @@ export class FpsMobaEngine {
   private punchChargeMs = 0;
   private isChargingPrimary = false;
   private primaryChargeMs = 0;
-  private activeBlueOrb: { mesh: THREE.Object3D; triggerAttract: () => void } | null = null;
+  private projectiles: Projectile[] = [];
+  private activeBlueOrb: LapseBlueProjectile | null = null;
   private isChargingBlue = false;
   private blueChargeMs = 0;
   private blueIndicator: THREE.Group | null = null;
@@ -155,6 +187,7 @@ export class FpsMobaEngine {
   private teleportMorph = 0;
   private activeDomains: DomainExpansion[] = [];
   private isPlayerDestructable = true;
+  private aiAttackingEnabled: boolean = getAiAttackingEnabled();
 
   get activeDomain(): DomainExpansion | null {
     return this.activeDomains.find((d) => d.casterId === 'player') ?? null;
@@ -192,8 +225,47 @@ export class FpsMobaEngine {
   private minionKills = 0;
   private playerRespawnTimer = 0;
 
-  // Cooldowns
-  private cooldowns: Record<FpsAbilityKey, { remainingMs: number; totalMs: number }>;
+  // Cooldowns (supports single-use cooldowns and multi-charge abilities like Jogo's Flame Dash)
+  private cooldowns: Record<
+    FpsAbilityKey,
+    { remainingMs: number; totalMs: number; charges?: number; maxCharges?: number }
+  >;
+
+  // Jogo abilities: Flame Dash, wall-sticking Mini Volcanoes, and Hold-Q Maximum: Meteor targeting
+  private flameDashTimer = 0;
+  private flameDashDir = new THREE.Vector3();
+  // Uro Takako abilities: Sky Pull 3D dash, buoyant hang-time, and airborne Sky Hover
+  private skyPullTimer = 0;
+  private skyPullBoostTimer = 0;
+  private skyPullDir = new THREE.Vector3();
+  private isSkyHovering = false;
+  private skyDeflectCounterCooldown = 0;
+  private activeVolcanoes: Array<{
+    group: THREE.Group;
+    lavaMesh: THREE.Mesh;
+    pos: THREE.Vector3;
+    normal: THREE.Vector3;
+    team: MobaTeam;
+    casterId: string;
+    damage: number;
+    radius: number;
+    age: number;
+    maxAge: number;
+    fireCooldown: number;
+  }> = [];
+  private meteorAiming = false;
+  private meteorTarget = new THREE.Vector3();
+  private meteorMarker: THREE.Group | null = null;
+
+  // Megumi Ten Shadows: Shadow Step submersion, Rabbit Escape -> Hold SPACE Nue carry, & low-HP scent markers
+  private shadowStepTimer = 0;
+  private shadowPuddleMesh: THREE.Mesh | null = null;
+  private lowHpTrackers = new Map<string, THREE.Mesh>();
+  private nueCarryAvailable = false;
+  private nueCarryDelaySec = 0;
+  private nueCarryTimer = 0;
+  private rabbitLaunchBoostTimer = 0;
+  private activeNueCarry: NueCarryShikigami | null = null;
 
   // Input state
   private keys: Set<string> = new Set();
@@ -225,6 +297,7 @@ export class FpsMobaEngine {
   private audioBuffers = new Map<string, AudioBuffer>();
   private playerShieldAudio: THREE.Audio | null = null;
   private playerDomainAudio: THREE.Audio | null = null;
+  private playerVoiceAudio: THREE.Audio | null = null;
 
   // Bound event listeners
   private onKeyDownBound: (e: KeyboardEvent) => void;
@@ -235,11 +308,18 @@ export class FpsMobaEngine {
   private onContextMenuBound: (e: MouseEvent) => void;
   private onPointerLockChangeBound: () => void;
   private onResizeBound: () => void;
+  public mapId: MobaMapId = 'arena';
 
-  constructor(container: HTMLElement, hero: FpsHeroDef, onHudUpdate: (state: FpsHudState) => void) {
+  constructor(
+    container: HTMLElement,
+    hero: FpsHeroDef,
+    onHudUpdate: (state: FpsHudState) => void,
+    mapId: MobaMapId = 'arena'
+  ) {
     this.container = container;
     this.hero = hero;
     this.onHudUpdate = onHudUpdate;
+    this.mapId = mapId;
 
     this.maxHp = hero.maxHp;
     this.hp = hero.maxHp;
@@ -251,10 +331,17 @@ export class FpsMobaEngine {
     this.barrierMaxHp = hero.secondaryFire.barrierMaxHp ?? 0;
     this.barrierHp = this.barrierMaxHp;
 
+    const makeCooldown = (ab: FpsAbilityDef) => ({
+      remainingMs: 0,
+      totalMs: ab.cooldownMs,
+      ...(ab.maxCharges && ab.maxCharges > 1
+        ? { charges: ab.maxCharges, maxCharges: ab.maxCharges }
+        : {})
+    });
     this.cooldowns = {
-      SHIFT: { remainingMs: 0, totalMs: hero.abilities.SHIFT.cooldownMs },
-      E: { remainingMs: 0, totalMs: hero.abilities.E.cooldownMs },
-      Q: { remainingMs: 0, totalMs: hero.abilities.Q.cooldownMs }
+      SHIFT: makeCooldown(hero.abilities.SHIFT),
+      E: makeCooldown(hero.abilities.E),
+      Q: makeCooldown(hero.abilities.Q)
     };
 
     this.onKeyDownBound = (e) => this.handleKeyDown(e);
@@ -272,6 +359,8 @@ export class FpsMobaEngine {
         this.punchChargeMs = 0;
         this.cancelBlueCharge();
         this.cancelTeleport();
+        this.cancelMeteorAim();
+        this.endNueCarry();
         this.stopAllAudio();
       } else {
         this.resumeAudioContext();
@@ -293,11 +382,25 @@ export class FpsMobaEngine {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
 
-    this.camera = new THREE.PerspectiveCamera(75, w / h, 0.1, 260);
+    this.camera = new THREE.PerspectiveCamera(68, w / h, 0.1, 260);
     this.camera.rotation.order = 'YXZ';
     this.scene.add(this.camera);
 
     // ── Attach 3D Spatial AudioListener to Camera ──
+    // Guard against a closed singleton THREE.AudioContext across SPA match transitions
+    try {
+      const existingCtx = THREE.AudioContext.getContext() as unknown as globalThis.AudioContext | null;
+      if (existingCtx && existingCtx.state === 'closed') {
+        const AudioCtor =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (AudioCtor) {
+          THREE.AudioContext.setContext(new AudioCtor());
+        }
+      }
+    } catch {
+      // Ignore audio context recovery errors
+    }
     this.audioListener = new THREE.AudioListener();
     this.camera.add(this.audioListener);
 
@@ -305,6 +408,8 @@ export class FpsMobaEngine {
     this.loadAudioBuffer('/assets/sounds/gojo/infinity_shield_hum.mp3').catch(() => {});
     this.loadAudioBuffer('/assets/sounds/gojo/hollow_purple_start.mp3').catch(() => {});
     this.loadAudioBuffer('/assets/sounds/gojo/unlimited_void.mp3').catch(() => {});
+    this.loadAudioBuffer('/assets/sounds/gojo/de_voice.mp3').catch(() => {});
+    this.loadAudioBuffer('/assets/sounds/gojo/murasaki.mp3').catch(() => {});
 
     const canvas = document.createElement('canvas');
     const gl2 = canvas.getContext('webgl2', {
@@ -329,14 +434,18 @@ export class FpsMobaEngine {
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    // High HDR threshold (1.28) so normal lit meshes/weapons never bloom, only HDR shader orbs (>1.3) glow
-    const bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.38, 0.35, 1.28);
+    // High HDR threshold (1.28) + controlled strength (0.23) for crisp anime glow without blinding glare
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.23, 0.32, 1.28);
     this.composer.addPass(bloomPass);
 
-    this.mapBuilder = new MobaMapBuilder();
+    this.mapBuilder = new MobaMapBuilder(this.mapId);
     this.mapBuilder.build(this.scene);
 
+    this.physicsWorld = new PhysicsWorld(this.scene, this.mapBuilder);
+    void this.physicsWorld.init();
+
     this.viewModel = new FpsViewModel(this.camera, this.hero);
+    this.viewModel.setHandDistanceOffset(getHandDistanceOffset());
     this.syncCameraToPlayer();
   }
 
@@ -469,16 +578,21 @@ export class FpsMobaEngine {
   }
 
   /**
-   * Spawns Mr. Biomaster and Gojo in the arena so they can cycle through their animations and roam the map.
+   * Spawns all 6 roster heroes (Higuruma, Jogo, Gojo, Megumi, Mr. Biomaster, Uro Takako) on the test map
+   * roaming and periodically showcasing their signature abilities.
    */
   private spawnHeroTrainingDummies() {
-    const biomaster = FPS_MOBA_HEROES.find((h) => h.id === 'mr_biomaster');
-    const gojo = FPS_MOBA_HEROES.find((h) => h.id === 'gojo');
-    const dummySpots: { hero: FpsHeroDef; x: number; z: number; yaw: number }[] = [];
-    if (biomaster) dummySpots.push({ hero: biomaster, x: -4.0, z: 46.0, yaw: 0.15 });
-    if (gojo) dummySpots.push({ hero: gojo, x: 4.0, z: 46.0, yaw: -0.15 });
+    const layout: Array<{ id: string; x: number; z: number; yaw: number; delay: number }> = [
+      { id: 'higuruma', x: -16.0, z: 40.0, yaw: 0.35, delay: 1.6 },
+      { id: 'jogo', x: -9.5, z: 33.0, yaw: 0.2, delay: 2.3 },
+      { id: 'gojo', x: -2.5, z: 44.0, yaw: 0.05, delay: 2.6 },
+      { id: 'uro', x: 3.5, z: 36.0, yaw: -0.08, delay: 2.0 },
+      { id: 'megumi', x: 10.0, z: 33.0, yaw: -0.2, delay: 3.1 },
+      { id: 'mr_biomaster', x: 16.5, z: 40.0, yaw: -0.35, delay: 3.8 }
+    ];
 
-    dummySpots.forEach(({ hero, x, z, yaw }) => {
+    layout.forEach(({ id, x, z, yaw, delay }) => {
+      const hero = FPS_MOBA_HEROES.find((h) => h.id === id);
       if (!hero) return;
       const spawnPos = new THREE.Vector3(x, 0, z);
 
@@ -493,8 +607,8 @@ export class FpsMobaEngine {
       group.rotation.y = yaw;
       this.scene.add(group);
 
-      const shieldMat = createInfinityDistortionMaterial();
-      // Infinity: 4m wide x 3m tall spatial distortion wall projected ~2.4m in front of him
+      const shieldMat =
+        hero.id === 'uro' ? createSkyVeilDistortionMaterial() : createInfinityDistortionMaterial();
       const shieldGeo = new THREE.PlaneGeometry(4, 3, 32, 24);
       const shieldMesh = new THREE.Mesh(shieldGeo, shieldMat);
       shieldMesh.position.set(0, 1.5, 2.4);
@@ -524,7 +638,7 @@ export class FpsMobaEngine {
         xpValue: 40,
         isDestructable: true,
         isDummy: true,
-        isRoamer: hero.id === 'mr_biomaster' || hero.id === 'gojo',
+        isRoamer: true,
         heroDef: hero,
         npcAi:
           hero.id === 'gojo'
@@ -545,13 +659,13 @@ export class FpsMobaEngine {
         spawnPos
       });
       unit.attackTimer = 1.5;
-      unit.npcAbilityTimer = hero.id === 'gojo' ? 2.4 : 3.2;
+      unit.npcAbilityTimer = delay;
       unit.npcAbilityIndex = 0;
       unit.npcShieldTimer = 0;
       unit.npcShieldMesh = shieldMesh;
       unit.npcShieldMat = shieldMat;
       unit.roamPhase = 'idle';
-      unit.roamTimer = hero.id === 'gojo' ? 5.8 : 4.1;
+      unit.roamTimer = hero.id === 'gojo' ? 5.8 : 3.6 + Math.random() * 2.0;
       unit.respawnTimer = 0;
 
       hitMeshes.forEach((m) => {
@@ -692,27 +806,45 @@ export class FpsMobaEngine {
     window.addEventListener('resize', this.onResizeBound);
   }
 
+  public setHandDistanceOffset(offsetMeters: number) {
+    this.viewModel?.setHandDistanceOffset(offsetMeters);
+  }
+
+  public setAiAttackingEnabled(enabled: boolean) {
+    this.aiAttackingEnabled = enabled;
+  }
+
   public requestPointerLock() {
     if (this.destroyed || this.winner) return;
+    this.resumeAudioContext();
     this.renderer?.domElement.requestPointerLock?.();
   }
 
   private handleKeyDown(e: KeyboardEvent) {
     const code = e.code;
     this.keys.add(code);
+    this.resumeAudioContext();
 
     if (!this.pointerLocked || this.playerRespawnTimer > 0 || this.winner) return;
 
     if (code === 'ShiftLeft' || code === 'ShiftRight') {
       e.preventDefault();
+      if (e.repeat) return;
       if (this.hero.abilities.SHIFT.kind === 'LIMITLESS_TELEPORT') {
         this.startTeleportAim();
       } else {
         this.tryCastAbility('SHIFT');
       }
-    } else if (code === 'KeyE') this.tryCastAbility('E');
-    else if (code === 'KeyQ') this.tryCastAbility('Q');
-    else if (code === 'KeyV') this.executeQuickMelee();
+    } else if (code === 'KeyE') {
+      if (!e.repeat) this.tryCastAbility('E');
+    } else if (code === 'KeyQ') {
+      if (e.repeat) return;
+      if (this.activeDomain?.isJogoDomain && !this.activeDomain.purpleTriggered) {
+        this.startMeteorAim();
+      } else {
+        this.tryCastAbility('Q');
+      }
+    } else if (code === 'KeyV') this.executeQuickMelee();
     else if (code === 'KeyR' || code === 'KeyC') this.startReload();
   }
 
@@ -721,13 +853,21 @@ export class FpsMobaEngine {
     if ((e.code === 'ShiftLeft' || e.code === 'ShiftRight') && this.teleportPhase === 'AIMING') {
       this.releaseTeleport();
     }
+    if (e.code === 'KeyQ' && this.meteorAiming) {
+      this.releaseMeteor();
+    }
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  Limitless Teleport (SHIFT): hold to aim in third person, release to cast (800ms), then blink
+  //  Limitless Teleport (SHIFT) & Jogo Maximum: Meteor (Hold Q in Domain) Third-Person Aiming
   // ─────────────────────────────────────────────────────────────
   private ensurePlayerAvatar() {
-    if (this.playerAvatar || this.hero.abilities.SHIFT.kind !== 'LIMITLESS_TELEPORT') return;
+    if (
+      this.playerAvatar ||
+      (this.hero.abilities.SHIFT.kind !== 'LIMITLESS_TELEPORT' && this.hero.id !== 'jogo')
+    ) {
+      return;
+    }
     const built = buildProceduralHeroModel(
       this.hero,
       this.hero.name.toUpperCase(),
@@ -822,7 +962,7 @@ export class FpsMobaEngine {
     x = resolved.x;
     z = resolved.z;
     for (const d of this.activeDomains) {
-      const c = d.clampPosition({ x, z }, 0.7, d.isPlayerTrapped);
+      const c = d.clampPosition({ x, z, y: this.playerPos.y }, 0.7, d.isPlayerTrapped);
       x = c.x;
       z = c.z;
     }
@@ -848,12 +988,15 @@ export class FpsMobaEngine {
 
   private updateTeleport(dt: number, elapsed: number) {
     if (this.playerRespawnTimer > 0 && this.teleportPhase !== 'NONE') this.cancelTeleport();
+    if ((this.playerRespawnTimer > 0 || !this.activeDomain?.isJogoDomain) && this.meteorAiming) {
+      this.cancelMeteorAim();
+    }
 
-    const target = this.teleportPhase !== 'NONE' ? 1 : 0;
+    const target = this.teleportPhase !== 'NONE' || this.meteorAiming ? 1 : 0;
     this.teleportCamBlend += (target - this.teleportCamBlend) * Math.min(1, dt * 9);
     if (Math.abs(this.teleportCamBlend - target) < 0.002) this.teleportCamBlend = target;
 
-    this.viewModel.root.visible = this.teleportCamBlend < 0.2;
+    this.viewModel.root.visible = this.teleportCamBlend < 0.2 && this.shadowStepTimer <= 0;
     if (this.teleportPhase === 'CASTING') {
       const k = this.teleportCastMs / this.hero.abilities.SHIFT.durationMs;
       this.teleportMorph = Math.min(1, Math.max(0, (k - 0.7) / 0.3));
@@ -872,6 +1015,15 @@ export class FpsMobaEngine {
           1 - this.teleportMorph * 0.75
         );
         avatar.animate(elapsed, false, false, 'idle');
+      }
+    }
+
+    if (this.meteorAiming) {
+      this.computeMeteorTarget();
+      if (this.meteorMarker) {
+        const pulse = 6.2 + Math.sin(elapsed * 8) * 0.28;
+        this.placeIndicator(this.meteorMarker, this.meteorTarget.x, this.meteorTarget.z, pulse);
+        this.meteorMarker.rotation.y += dt * 2.1;
       }
     }
 
@@ -898,6 +1050,698 @@ export class FpsMobaEngine {
         this.teleportMarker.rotation.y += dt * (3 + k * 14);
       }
       if (this.teleportCastMs >= ab.durationMs) this.performTeleport();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  Jogo Maximum: Meteor (Hold Q inside Coffin of the Iron Mountain -> Release to drop)
+  // ─────────────────────────────────────────────────────────────
+  private startMeteorAim() {
+    if (this.meteorAiming || this.playerRespawnTimer > 0 || this.winner) return;
+    const dom = this.activeDomain;
+    if (!dom || !dom.isJogoDomain || dom.purpleTriggered) return;
+    if (!this.canSpendCursedEnergy()) return;
+
+    this.meteorAiming = true;
+    this.ensurePlayerAvatar();
+    if (!this.meteorMarker) {
+      this.meteorMarker = this.createRadiusIndicator('#ff4500');
+    }
+    this.computeMeteorTarget();
+    this.placeIndicator(this.meteorMarker, this.meteorTarget.x, this.meteorTarget.z, 6.2);
+  }
+
+  private computeMeteorTarget() {
+    const dom = this.activeDomain;
+    const f = new THREE.Vector3(
+      -Math.sin(this.yaw) * Math.cos(this.pitch),
+      Math.sin(this.pitch),
+      -Math.cos(this.yaw) * Math.cos(this.pitch)
+    );
+    const flat = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    const o = this.camera.position;
+    const groundY = dom ? dom.center.y : this.playerPos.y;
+    const maxRange = dom ? dom.radius * 1.85 : 22;
+
+    let tx: number;
+    let tz: number;
+    if (f.y < -0.04) {
+      const t = (groundY - o.y) / f.y;
+      tx = o.x + f.x * t;
+      tz = o.z + f.z * t;
+    } else {
+      tx = this.playerPos.x + flat.x * 12;
+      tz = this.playerPos.z + flat.z * 12;
+    }
+
+    if (dom) {
+      const dx = tx - dom.center.x;
+      const dz = tz - dom.center.z;
+      const d = Math.hypot(dx, dz);
+      const maxInner = Math.max(2.0, dom.radius - 1.2);
+      if (d > maxInner && d > 0.001) {
+        tx = dom.center.x + (dx / d) * maxInner;
+        tz = dom.center.z + (dz / d) * maxInner;
+      }
+    } else {
+      const dx = tx - this.playerPos.x;
+      const dz = tz - this.playerPos.z;
+      const d = Math.hypot(dx, dz);
+      if (d > maxRange && d > 0.001) {
+        tx = this.playerPos.x + (dx / d) * maxRange;
+        tz = this.playerPos.z + (dz / d) * maxRange;
+      }
+    }
+
+    const floorY = this.mapBuilder.getFloorHeight(tx, tz, groundY);
+    this.meteorTarget.set(tx, floorY, tz);
+  }
+
+  private releaseMeteor() {
+    if (!this.meteorAiming) return;
+    const dom = this.activeDomain;
+    const target = this.meteorTarget.clone();
+    this.cancelMeteorAim();
+    if (!dom || !dom.isJogoDomain || dom.purpleTriggered || !this.canSpendCursedEnergy()) return;
+
+    dom.purpleTriggered = true;
+    this.consumeCursedEnergy(35);
+    this.viewModel.triggerCastGesture();
+
+    this.damagePopups.push({
+      id: this.popupCounter++,
+      x: 50,
+      y: 30,
+      amount: 0,
+      label: 'MAXIMUM: METEOR!',
+      isCrit: true,
+      color: '#ff4500',
+      ageSec: 0,
+      opacity: 1
+    });
+
+    const meteor = new MaximumMeteorProjectile({
+      targetPos: target,
+      blastRadius: 11.5,
+      damage: 240,
+      team: 'blue',
+      casterId: 'player',
+      casterName: this.hero.name,
+      scene: this.scene
+    });
+    this.scene.add(meteor.mesh);
+    this.projectiles.push(meteor);
+
+    // Dropping Maximum: Meteor ends the Domain Expansion and triggers technique burnout
+    this.endActiveDomain();
+  }
+
+  private cancelMeteorAim() {
+    this.meteorAiming = false;
+    if (this.meteorMarker) {
+      this.scene.remove(this.meteorMarker);
+      this.meteorMarker = null;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  Jogo Ability E: Wall-Sticking Mini Volcanoes (180° frontal firing hemisphere)
+  // ─────────────────────────────────────────────────────────────
+  private plantMiniVolcano(
+    pos: THREE.Vector3,
+    normal: THREE.Vector3,
+    team: MobaTeam,
+    casterId: string,
+    damage: number,
+    radius: number,
+    durationMs: number
+  ) {
+    // Cap active volcanoes per caster to 3 (despawn oldest cleanly)
+    const owned = this.activeVolcanoes.filter((v) => v.casterId === casterId);
+    if (owned.length >= 3) {
+      const oldest = owned[0];
+      this.scene.remove(oldest.group);
+      const idx = this.activeVolcanoes.indexOf(oldest);
+      if (idx !== -1) this.activeVolcanoes.splice(idx, 1);
+    }
+
+    const group = new THREE.Group();
+    group.position.copy(pos);
+    const up = new THREE.Vector3(0, 1, 0);
+    const q = new THREE.Quaternion().setFromUnitVectors(up, normal.clone().normalize());
+    group.quaternion.copy(q);
+
+    // Sculpted obsidian volcanic cone + molten glowing rim
+    const rockMat = new THREE.MeshStandardMaterial({
+      color: 0x261a15,
+      emissive: 0x7c2d12,
+      emissiveIntensity: 0.45,
+      roughness: 0.85,
+      metalness: 0.1
+    });
+    const cone = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.56, 0.62, 10), rockMat);
+    cone.position.y = 0.28;
+    group.add(cone);
+
+    const rim = new THREE.Mesh(
+      new THREE.TorusGeometry(0.24, 0.055, 8, 16),
+      new THREE.MeshBasicMaterial({ color: 0xff4500 })
+    );
+    rim.rotation.x = Math.PI * 0.5;
+    rim.position.y = 0.58;
+    group.add(rim);
+
+    const lavaMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.2, 12, 10),
+      new THREE.MeshBasicMaterial({ color: 0xfacc15 })
+    );
+    lavaMesh.scale.set(1, 0.55, 1);
+    lavaMesh.position.y = 0.54;
+    group.add(lavaMesh);
+
+    this.scene.add(group);
+    this.activeVolcanoes.push({
+      group,
+      lavaMesh,
+      pos: pos.clone(),
+      normal: normal.clone().normalize(),
+      team,
+      casterId,
+      damage,
+      radius,
+      age: 0,
+      maxAge: durationMs / 1000,
+      fireCooldown: 0.25
+    });
+  }
+
+  private updateVolcanoes(dt: number, elapsed: number) {
+    const losRay = new THREE.Raycaster();
+    for (let i = this.activeVolcanoes.length - 1; i >= 0; i--) {
+      const v = this.activeVolcanoes[i];
+      v.age += dt;
+      if (v.age >= v.maxAge) {
+        this.spawnCursedBurst(v.pos.clone().addScaledVector(v.normal, 0.4), 'FIRE', 1.1, 24);
+        this.scene.remove(v.group);
+        this.activeVolcanoes.splice(i, 1);
+        continue;
+      }
+
+      const pulse = 1 + Math.sin(elapsed * 12 + i) * 0.14;
+      v.lavaMesh.scale.set(pulse, 0.55 * pulse, pulse);
+
+      v.fireCooldown -= dt;
+      if (v.fireCooldown > 0) continue;
+
+      // Scan for nearest enemy inside the volcano's 180° hemisphere (dot(toTarget, normal) >= 0)
+      const nozzlePos = v.pos.clone().addScaledVector(v.normal, 0.65);
+      let bestTargetPos: THREE.Vector3 | null = null;
+      let bestDist = v.radius;
+
+      for (const u of this.units) {
+        if (!u.alive || u.team === v.team) continue;
+        const targetCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
+        const toTarget = targetCenter.clone().sub(v.pos);
+        const dist = toTarget.length();
+        if (dist > bestDist || dist < 0.2) continue;
+
+        const dir = toTarget.clone().divideScalar(dist);
+        // 180-degree hemisphere check relative to surface normal
+        if (dir.dot(v.normal) < 0) continue;
+
+        // Verify clear line-of-sight from crater nozzle to target
+        const nozzleToTarget = targetCenter.clone().sub(nozzlePos);
+        const nozzleDist = nozzleToTarget.length();
+        if (nozzleDist > 0.25) {
+          losRay.set(nozzlePos, nozzleToTarget.divideScalar(nozzleDist));
+          losRay.near = 0.05;
+          losRay.far = nozzleDist - 0.3;
+          if (losRay.intersectObjects(this.mapBuilder.raycastObstacles, false).length > 0) {
+            continue;
+          }
+        }
+
+        bestDist = dist;
+        bestTargetPos = targetCenter;
+      }
+
+      if (bestTargetPos) {
+        v.fireCooldown = 0.68;
+        const shootDir = bestTargetPos.clone().sub(nozzlePos).normalize();
+        const bolt = new FireBoltProjectile({
+          startPos: nozzlePos,
+          forward: shootDir,
+          damage: v.damage,
+          team: v.team,
+          casterId: v.casterId,
+          casterName: this.hero.name
+        });
+        this.scene.add(bolt.mesh);
+        this.projectiles.push(bolt);
+        this.spawnImpactRing(nozzlePos, '#ff6b00', 0.9);
+      } else {
+        v.fireCooldown = 0.12;
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  Megumi Fushiguro — Ten Shadows Shikigami, Shadow Step & Mahoraga
+  // ─────────────────────────────────────────────────────────────
+  private enterShadowStep(durationSec: number) {
+    this.endNueCarry();
+    this.nueCarryAvailable = false;
+    this.shadowStepTimer = durationSec;
+    // Instant shadow-storage reload + small Overhealth stored
+    this.isReloading = false;
+    this.reloadRemainingMs = 0;
+    this.ammo = this.maxAmmo;
+    this.shield = Math.min(200, this.shield + 20);
+
+    if (!this.shadowPuddleMesh) {
+      const geo = new THREE.CircleGeometry(1.35, 32);
+      geo.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x1e1b4b,
+        transparent: true,
+        opacity: 0.88,
+        side: THREE.DoubleSide
+      });
+      this.shadowPuddleMesh = new THREE.Mesh(geo, mat);
+      this.scene.add(this.shadowPuddleMesh);
+    }
+    this.shadowPuddleMesh.visible = true;
+    this.shadowPuddleMesh.position.set(this.playerPos.x, this.playerPos.y + 0.08, this.playerPos.z);
+
+    this.spawnImpactRing(this.playerPos.clone().add(new THREE.Vector3(0, 0.12, 0)), '#6366f1', 3.2);
+    this.spawnCursedBurst(this.playerPos.clone().add(new THREE.Vector3(0, 0.5, 0)), 'SHADOW', 1.6, 44);
+    this.damagePopups.push({
+      id: this.popupCounter++,
+      x: 50,
+      y: 38,
+      amount: 0,
+      label: 'SHADOW STEP · INSTANT RELOAD',
+      isCrit: false,
+      color: '#a5b4fc',
+      ageSec: 0,
+      opacity: 1
+    });
+  }
+
+  private exitShadowStep() {
+    if (this.shadowStepTimer <= 0) return;
+    this.shadowStepTimer = 0;
+    if (this.shadowPuddleMesh) {
+      this.shadowPuddleMesh.visible = false;
+    }
+    this.spawnImpactRing(this.playerPos.clone().add(new THREE.Vector3(0, 0.15, 0)), '#818cf8', 2.4);
+    this.spawnCursedBurst(this.playerPos.clone().add(new THREE.Vector3(0, 0.6, 0)), 'SHADOW', 1.2, 28);
+  }
+
+  private getShikigamiContext(): ShikigamiContext {
+    return {
+      scene: this.scene,
+      units: this.units,
+      playerPos: this.playerPos,
+      playerDetectable: this.playerRespawnTimer <= 0 && this.shadowStepTimer <= 0,
+      damageUnit: (unit, amount, isCrit, sourceName, hitPos, customLabel) =>
+        this.damageUnit(unit as MobaUnit, amount, isCrit, sourceName, hitPos, customLabel),
+      grantAbilityPassive: (didHit) => this.grantAbilityPassive(didHit),
+      spawnImpactRing: (pos, colorHex, maxRadius) => this.spawnImpactRing(pos, colorHex, maxRadius),
+      spawnCursedBurst: (pos, variant, radius, count) =>
+        this.spawnCursedBurst(pos, variant, radius, count),
+      spawnPopup: (label, color, y = 32, amount = 0, isCrit = false) => {
+        this.damagePopups.push({
+          id: this.popupCounter++,
+          x: 50,
+          y,
+          amount,
+          label,
+          isCrit,
+          color,
+          ageSec: 0,
+          opacity: 1
+        });
+      }
+    };
+  }
+
+  private summonDivineDogs() {
+    const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
+    const spawnCount = inShadowGarden ? 3 : 1;
+    const maxDogs = inShadowGarden ? 4 : 1;
+
+    const existingDogs = this.units.filter(
+      (u): u is DivineDogShikigami =>
+        u.alive && u instanceof DivineDogShikigami && u.team === 'blue'
+    );
+    let excess = existingDogs.length + spawnCount - maxDogs;
+    const shikiCtx = this.getShikigamiContext();
+    for (let i = 0; i < existingDogs.length && excess > 0; i++) {
+      const old = existingDogs[i];
+      old.onDespawn(shikiCtx);
+      const idx = this.units.indexOf(old);
+      if (idx !== -1) this.units.splice(idx, 1);
+      excess--;
+    }
+
+    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    const rightVec = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+
+    for (let i = 0; i < spawnCount; i++) {
+      const side = spawnCount === 1 ? 0 : (i - (spawnCount - 1) * 0.5) * 1.6;
+      const spawnPos = this.playerPos
+        .clone()
+        .addScaledVector(flatForward, 2.4)
+        .addScaledVector(rightVec, side);
+      const resolved = this.mapBuilder.resolveHorizontalCollision(spawnPos.x, spawnPos.z, 0.7, this.playerPos.y);
+      spawnPos.set(
+        resolved.x,
+        this.mapBuilder.getFloorHeight(resolved.x, resolved.z, this.playerPos.y),
+        resolved.z
+      );
+
+      const dog = new DivineDogShikigami({
+        variant: 'BLACK',
+        spawnPos,
+        team: 'blue',
+        summonerId: 'player',
+        phaseShift: i * 1.4,
+        createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+      });
+      this.scene.add(dog.group);
+      this.units.push(dog);
+
+      this.spawnImpactRing(spawnPos.clone().add(new THREE.Vector3(0, 0.15, 0)), '#6366f1', 2.0);
+      this.spawnCursedBurst(spawnPos.clone().add(new THREE.Vector3(0, 0.5, 0)), 'SHADOW', 1.1, 24);
+    }
+  }
+
+  private summonRabbitEscape() {
+    const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
+    const spawnCount = inShadowGarden ? 18 : 10;
+    const maxRabbits = inShadowGarden ? 24 : 14;
+
+    const existingRabbits = this.units.filter(
+      (u): u is RabbitEscapeShikigami =>
+        u.alive && u instanceof RabbitEscapeShikigami && u.team === 'blue'
+    );
+    let excess = existingRabbits.length + spawnCount - maxRabbits;
+    const shikiCtx = this.getShikigamiContext();
+    for (let i = 0; i < existingRabbits.length && excess > 0; i++) {
+      const old = existingRabbits[i];
+      old.onDespawn(shikiCtx);
+      const idx = this.units.indexOf(old);
+      if (idx !== -1) this.units.splice(idx, 1);
+      excess--;
+    }
+
+    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    this.shield = Math.min(200, this.shield + 15);
+    // High upward launch + sustained upward momentum window so Megumi can choose when to invoke Nue
+    this.playerVel.y = 24.5;
+    this.playerVel.x += flatForward.x * 4.0;
+    this.playerVel.z += flatForward.z * 4.0;
+    this.grounded = false;
+    this.rabbitLaunchBoostTimer = 0.65;
+    this.nueCarryAvailable = true;
+    this.nueCarryDelaySec = 0.22;
+
+    this.spawnImpactRing(this.playerPos.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 5.2);
+    this.spawnCursedBurst(this.playerPos.clone().add(new THREE.Vector3(0, 0.7, 0)), 'SHADOW', 2.6, 60);
+
+    for (let i = 0; i < spawnCount; i++) {
+      const angle = (i / spawnCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
+      const dist = 1.4 + Math.random() * 2.4;
+      const rawX = this.playerPos.x + Math.cos(angle) * dist + flatForward.x * 1.1;
+      const rawZ = this.playerPos.z + Math.sin(angle) * dist + flatForward.z * 1.1;
+      const resolved = this.mapBuilder.resolveHorizontalCollision(rawX, rawZ, 0.42, this.playerPos.y);
+      const spawnPos = new THREE.Vector3(
+        resolved.x,
+        this.mapBuilder.getFloorHeight(resolved.x, resolved.z, this.playerPos.y),
+        resolved.z
+      );
+
+      const rabbit = new RabbitEscapeShikigami({
+        spawnPos,
+        team: 'blue',
+        summonerId: 'player',
+        hopPhase: Math.random() * Math.PI * 2,
+        scatterAngle: angle,
+        createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+      });
+      this.scene.add(rabbit.group);
+      this.units.push(rabbit);
+    }
+  }
+
+  private startNueCarry() {
+    this.nueCarryAvailable = false;
+    this.rabbitLaunchBoostTimer = 0;
+    this.nueCarryTimer = 2.0;
+    this.playerVel.y = 0;
+    this.grounded = false;
+
+    if (this.activeNueCarry) {
+      this.endNueCarry();
+      this.nueCarryTimer = 2.0;
+    }
+
+    const nue = new NueCarryShikigami({
+      spawnPos: this.playerPos.clone().add(new THREE.Vector3(0, 2.45, 0)),
+      team: 'blue',
+      summonerId: 'player',
+      getYaw: () => this.yaw,
+      createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+    });
+    this.scene.add(nue.group);
+    this.units.push(nue);
+    this.activeNueCarry = nue;
+
+    this.spawnImpactRing(this.playerPos.clone().add(new THREE.Vector3(0, 1.8, 0)), '#38bdf8', 3.4);
+    this.spawnCursedBurst(this.playerPos.clone().add(new THREE.Vector3(0, 2.0, 0)), 'BLUE', 1.5, 32);
+  }
+
+  private endNueCarry() {
+    this.nueCarryTimer = 0;
+    if (this.activeNueCarry) {
+      const carry = this.activeNueCarry;
+      this.activeNueCarry = null;
+      carry.onDespawn(this.getShikigamiContext());
+      const idx = this.units.indexOf(carry);
+      if (idx !== -1) this.units.splice(idx, 1);
+    }
+  }
+
+  private findToadRescueAlly(): MobaUnit | null {
+    const camPos = this.camera.position;
+    const camDir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    let bestAlly: MobaUnit | null = null;
+    let bestScore = 0.88;
+
+    for (const u of this.units) {
+      if (
+        !u.alive ||
+        u.team !== 'blue' ||
+        u.type === 'TOWER' ||
+        u.type === 'CORE' ||
+        u instanceof MahoragaShikigami ||
+        u instanceof ToadShikigami ||
+        u instanceof NueShikigami ||
+        u instanceof NueCarryShikigami ||
+        u instanceof RabbitEscapeShikigami
+      ) {
+        continue;
+      }
+      const center = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
+      const toAlly = center.clone().sub(camPos);
+      const dist = toAlly.length();
+      if (dist < 2.2 || dist > 30) continue;
+      const dot = toAlly.divideScalar(dist).dot(camDir);
+      if (dot > bestScore) {
+        bestScore = dot;
+        bestAlly = u;
+      }
+    }
+    return bestAlly;
+  }
+
+  private castNueOrToad(ab: FpsAbilityDef) {
+    const ally = this.findToadRescueAlly();
+    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+
+    if (ally) {
+      const safePos = this.playerPos.clone().addScaledVector(flatForward, 2.2);
+      const resolvedSafe = this.mapBuilder.resolveHorizontalCollision(safePos.x, safePos.z, ally.radius, this.playerPos.y);
+      safePos.set(
+        resolvedSafe.x,
+        this.mapBuilder.getFloorHeight(resolvedSafe.x, resolvedSafe.z, this.playerPos.y),
+        resolvedSafe.z
+      );
+
+      const toadPos = this.playerPos.clone().addScaledVector(flatForward, 1.3);
+      toadPos.y = this.mapBuilder.getFloorHeight(toadPos.x, toadPos.z, this.playerPos.y);
+
+      const toad = new ToadShikigami({
+        spawnPos: toadPos,
+        safePos,
+        ally,
+        team: 'blue',
+        summonerId: 'player',
+        createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+      });
+      this.scene.add(toad.group);
+      this.units.push(toad);
+
+      const tongueOrigin = toadPos.clone().add(new THREE.Vector3(0, 0.65, 0));
+      this.spawnBeamTracer(
+        tongueOrigin,
+        ally.group.position.clone().add(new THREE.Vector3(0, ally.height * 0.5, 0)),
+        '#f472b6',
+        0.38,
+        0.14
+      );
+      this.spawnImpactRing(ally.group.position.clone().add(new THREE.Vector3(0, 0.3, 0)), '#f472b6', 2.4);
+
+      ally.hp = Math.min(ally.maxHp, ally.hp + 35);
+      this.grantAbilityPassive(true);
+
+      this.damagePopups.push({
+        id: this.popupCounter++,
+        x: 50,
+        y: 38,
+        amount: 35,
+        label: `TOAD RESCUE · ${ally.name.toUpperCase()}`,
+        isCrit: false,
+        color: '#f472b6',
+        ageSec: 0,
+        opacity: 1
+      });
+      return;
+    }
+
+    // NUE: Winged lightning shikigami swoops down onto aimed spot to stun-shock enemies!
+    const targetPt = this.getAimGroundPoint(28);
+    const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
+    const rightVec = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const offsets = inShadowGarden ? [-3.0, 3.0] : [0];
+
+    for (const lat of offsets) {
+      const startPos = this.playerPos
+        .clone()
+        .add(new THREE.Vector3(0, 6.2, 0))
+        .addScaledVector(rightVec, lat * 0.8);
+      const tPos = targetPt.clone().addScaledVector(rightVec, lat);
+      tPos.y = this.mapBuilder.getFloorHeight(tPos.x, tPos.z, targetPt.y);
+
+      const nue = new NueShikigami({
+        startPos,
+        targetPos: tPos,
+        shockRadius: ab.radius,
+        damage: ab.damage,
+        stunSec: ab.durationMs / 1000,
+        team: 'blue',
+        summonerId: 'player',
+        createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+      });
+      this.scene.add(nue.group);
+      this.units.push(nue);
+    }
+  }
+
+  private summonMahoraga() {
+    const dom = this.activeDomain;
+    if (!dom || !dom.isMegumiDomain || dom.purpleTriggered) return;
+    dom.purpleTriggered = true;
+
+    const shikiCtx = this.getShikigamiContext();
+    for (let i = this.units.length - 1; i >= 0; i--) {
+      const existing = this.units[i];
+      if (existing instanceof MahoragaShikigami) {
+        existing.onDespawn(shikiCtx);
+        this.units.splice(i, 1);
+      }
+    }
+
+    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    const spawnPos = this.playerPos.clone().addScaledVector(flatForward, 4.2);
+    const resolved = this.mapBuilder.resolveHorizontalCollision(spawnPos.x, spawnPos.z, 1.1, this.playerPos.y);
+    spawnPos.set(
+      resolved.x,
+      this.mapBuilder.getFloorHeight(resolved.x, resolved.z, this.playerPos.y),
+      resolved.z
+    );
+
+    const mahoraga = new MahoragaShikigami({
+      spawnPos,
+      ownerTeam: 'blue',
+      summonerId: 'player',
+      createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team),
+      createNameplate: (parent, y, text, col) => this.createHeroNameplate(parent, y, text, col)
+    });
+    this.scene.add(mahoraga.group);
+    this.units.push(mahoraga);
+
+    this.spawnImpactRing(spawnPos.clone().add(new THREE.Vector3(0, 0.2, 0)), '#facc15', 7.5);
+    this.spawnCursedBurst(spawnPos.clone().add(new THREE.Vector3(0, 1.6, 0)), 'SHADOW', 3.4, 95);
+
+    this.damagePopups.push({
+      id: this.popupCounter++,
+      x: 50,
+      y: 28,
+      amount: 0,
+      label: 'WITH THIS TREASURE I SUMMON... MAHORAGA!',
+      isCrit: true,
+      color: '#facc15',
+      ageSec: 0,
+      opacity: 1
+    });
+
+    this.endActiveDomain();
+  }
+
+  private updateLowHpTrackers(elapsed: number) {
+    const hasTrackingShikigami = this.units.some(
+      (u) => u.alive && u instanceof ShikigamiEntity && u.tracksLowHpThroughWalls && u.team === 'blue'
+    );
+    const activeIds = new Set<string>();
+
+    if (hasTrackingShikigami) {
+      for (const u of this.units) {
+        if (!u.alive || u.team !== 'red' || u.type === 'TOWER' || u.type === 'CORE') continue;
+        if (u.hp / u.maxHp <= 0.65) {
+          activeIds.add(u.id);
+          let marker = this.lowHpTrackers.get(u.id);
+          if (!marker) {
+            marker = new THREE.Mesh(
+              new THREE.OctahedronGeometry(0.32, 0),
+              new THREE.MeshBasicMaterial({
+                color: 0xf43f5e,
+                transparent: true,
+                opacity: 0.85,
+                depthTest: false
+              })
+            );
+            marker.renderOrder = 999;
+            this.scene.add(marker);
+            this.lowHpTrackers.set(u.id, marker);
+          }
+          marker.position.set(
+            u.group.position.x,
+            u.group.position.y + u.height + 0.95 + Math.sin(elapsed * 6) * 0.14,
+            u.group.position.z
+          );
+          marker.rotation.y = elapsed * 3.5;
+        }
+      }
+    }
+
+    for (const [id, marker] of this.lowHpTrackers.entries()) {
+      if (!activeIds.has(id)) {
+        this.scene.remove(marker);
+        marker.geometry.dispose();
+        this.lowHpTrackers.delete(id);
+      }
     }
   }
 
@@ -1001,7 +1845,8 @@ export class FpsMobaEngine {
     }
     return (
       this.rightMouseDown &&
-      this.hero.secondaryFire.kind === 'BARRIER_SHIELD' &&
+      (this.hero.secondaryFire.kind === 'BARRIER_SHIELD' ||
+        this.hero.secondaryFire.kind === 'SKY_DEFLECT') &&
       this.barrierHp > 0 &&
       this.secondaryCooldownMs <= 0
     );
@@ -1011,16 +1856,37 @@ export class FpsMobaEngine {
   //  Secondary Fire (M2): Barrier Shield, Charged Rocket Punch, Helix Rocket, or Two-Stage Lapse Blue Orb
   // ─────────────────────────────────────────────────────────────
   private startSecondaryFire() {
-    if (this.playerRespawnTimer > 0 || this.winner || this.teleportPhase !== 'NONE') return;
+    if (this.playerRespawnTimer > 0 || this.winner || this.teleportPhase !== 'NONE' || this.meteorAiming) return;
     const sec = this.hero.secondaryFire;
+    if (sec.kind === 'NONE') return;
+
+    if (sec.kind === 'DIVINE_DOGS') {
+      if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
+      this.exitShadowStep();
+      this.consumeCursedEnergy(sec.manaCost ?? 22);
+      const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
+      this.secondaryCooldownMs = inShadowGarden ? 2600 : (sec.cooldownMs ?? 7000);
+      this.viewModel.triggerCastGesture();
+      this.summonDivineDogs();
+      return;
+    }
+
+    if (sec.kind === 'RABBIT_ESCAPE') {
+      if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
+      this.exitShadowStep();
+      this.consumeCursedEnergy(sec.manaCost ?? 22);
+      const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
+      this.secondaryCooldownMs = inShadowGarden ? 2500 : (sec.cooldownMs ?? 6500);
+      this.viewModel.triggerCastGesture();
+      this.summonRabbitEscape();
+      return;
+    }
 
     if (sec.kind === 'LAPSE_BLUE_ORB') {
-      // 2nd Right Click: Detonate active Lapse Blue orb to attract enemies within 3m (10 CE)
+      // 2nd Right Click: Detonate active Lapse Blue orb to attract enemies within radius (Free - already paid on cast)
       if (this.activeBlueOrb) {
-        if (!this.canSpendCursedEnergy()) return;
-        this.consumeCursedEnergy(10);
         this.viewModel.triggerCastGesture();
-        this.activeBlueOrb.triggerAttract();
+        this.activeBlueOrb.triggerAttract(this.getProjectileContext());
         return;
       }
       if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
@@ -1108,6 +1974,7 @@ export class FpsMobaEngine {
     this.cancelBlueCharge();
     if (!this.canSpendCursedEnergy()) return;
     this.consumeCursedEnergy(sec.manaCost ?? 12);
+    this.viewModel.triggerFireRecoil();
     this.viewModel.triggerCastGesture();
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
     this.launchTwoStageBlueOrb({
@@ -1232,18 +2099,20 @@ export class FpsMobaEngine {
   }
 
   private executeQuickMelee() {
-    if (this.fireCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
-    this.consumeCursedEnergy(5);
+    if (this.playerRespawnTimer > 0 || this.winner || this.fireCooldownMs > 0) return;
     this.fireCooldownMs = 450;
     this.viewModel.triggerQuickMelee();
     this.performMeleeCleave(38, 4.2, 95, 3.5, 'Quick Melee');
   }
 
   private tryPrimaryFire(releasedChargeRatio?: number) {
-    if (this.playerRespawnTimer > 0 || this.winner || this.isChargingPunch || this.teleportPhase !== 'NONE') return;
-    if (!this.canSpendCursedEnergy()) {
-      this.isChargingPrimary = false;
-      this.primaryChargeMs = 0;
+    if (
+      this.playerRespawnTimer > 0 ||
+      this.winner ||
+      this.isChargingPunch ||
+      this.teleportPhase !== 'NONE' ||
+      this.meteorAiming
+    ) {
       return;
     }
     if (this.isBarrierActive()) {
@@ -1254,11 +2123,79 @@ export class FpsMobaEngine {
     if (this.isReloading || this.fireCooldownMs > 0) return;
 
     const wep = this.hero.weapon;
+    if (this.shadowStepTimer > 0) {
+      this.exitShadowStep();
+    }
 
-    // 1. MELEE CLEAVE HEROES (Higuruma Gavel / Executioner's Sword / Brigid Flail)
+    // 0. HYBRID SHADOW (Megumi): Broadsword cleave if enemy within 4.5m in front, else Shadow Kunai throw
+    if (wep.fireMode === 'HYBRID_SHADOW') {
+      const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+      const minCos = Math.cos(THREE.MathUtils.degToRad((wep.cleaveArcDeg ?? 115) * 0.5));
+      let closeEnemy = false;
+      for (const u of this.units) {
+        if (!u.alive || u.team !== 'red') continue;
+        const toU = u.group.position.clone().sub(this.playerPos);
+        toU.y = 0;
+        const d = toU.length();
+        if (d <= 4.5 + u.radius && (d < 1.8 || toU.normalize().dot(flatForward) >= minCos)) {
+          closeEnemy = true;
+          break;
+        }
+      }
+
+      if (closeEnemy) {
+        // Melee cleave does not require or consume Cursed Energy
+        const rateMult = this.activeDomain ? 0.72 : 1.0;
+        this.fireCooldownMs = Math.round(440 * rateMult);
+        this.viewModel.triggerMeleeSlash();
+        const slashDmg = Math.round((wep.maxDamage ?? 54) + (this.level - 1) * 3.5);
+        this.performMeleeCleave(
+          slashDmg,
+          4.6,
+          wep.cleaveArcDeg ?? 115,
+          wep.knockback ?? 4.5,
+          'Cursed Broadsword'
+        );
+        return;
+      }
+
+      // Ranged mode: Shadow-Infused Kunai (requires Cursed Energy)
+      if (!this.canSpendCursedEnergy()) return;
+      if (this.ammo <= 0 && !this.activeDomain) {
+        this.startReload();
+        return;
+      }
+      this.consumeCursedEnergy(wep.manaCost ?? 6);
+      if (!this.activeDomain) {
+        this.ammo--;
+        if (this.ammo <= 0) {
+          setTimeout(() => this.startReload(), 120);
+        }
+      }
+      const rateMult = this.activeDomain ? 0.68 : 1.0;
+      this.fireCooldownMs = Math.round(wep.fireRateMs * rateMult);
+      this.viewModel.triggerFireRecoil();
+
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+      const muzzleWorld = new THREE.Vector3(0.24, -0.18, -0.72).applyMatrix4(this.camera.matrixWorld);
+      const kunaiDmg = Math.round(wep.damage + (this.level - 1) * 2.5);
+      const kunai = new ShadowKunaiProjectile({
+        startPos: muzzleWorld.clone().addScaledVector(forward, 0.25),
+        forward,
+        damage: kunaiDmg,
+        team: 'blue',
+        casterId: 'player',
+        casterName: this.hero.name
+      });
+      this.scene.add(kunai.mesh);
+      this.projectiles.push(kunai);
+      return;
+    }
+
+    // 1. MELEE CLEAVE HEROES (Megumi Broadsword / Higuruma Gavel / Executioner's Sword)
+    // Melee-based attacks do not require or consume Cursed Energy.
     if (wep.fireMode === 'MELEE_CLEAVE') {
       const execActive = this.executionerTimerSec > 0;
-      this.consumeCursedEnergy(wep.manaCost ?? 6);
       this.fireCooldownMs = execActive ? Math.round(wep.fireRateMs * 0.72) : wep.fireRateMs;
       this.viewModel.triggerFireRecoil();
       const baseDmg = execActive ? Math.round(wep.damage * 2.15) : wep.damage;
@@ -1273,7 +2210,12 @@ export class FpsMobaEngine {
       return;
     }
 
-    // 2. RANGED / HAND CANNON HEROES
+    // 2. RANGED / CURSED-ENERGY WEAPONS (require Cursed Energy)
+    if (!this.canSpendCursedEnergy()) {
+      this.isChargingPrimary = false;
+      this.primaryChargeMs = 0;
+      return;
+    }
     if (this.ammo <= 0 && !this.activeDomain) {
       this.isChargingPrimary = false;
       this.primaryChargeMs = 0;
@@ -1295,8 +2237,10 @@ export class FpsMobaEngine {
     const shotManaCost = Math.round(wep.manaCost ?? 4);
     this.consumeCursedEnergy(shotManaCost);
     const shotBaseDamage = THREE.MathUtils.lerp(wep.damage, wep.maxDamage ?? wep.damage, chargeRatio);
+    // Curve knockback with charge so quick taps give a subtle nudge while full-charge Red launches enemies far
+    const knockbackT = wep.chargeable ? Math.pow(chargeRatio, 1.25) : chargeRatio;
     const shotKnockback = wep.knockback
-      ? THREE.MathUtils.lerp(wep.knockback, wep.maxKnockback ?? wep.knockback, chargeRatio)
+      ? THREE.MathUtils.lerp(wep.knockback, wep.maxKnockback ?? wep.knockback, knockbackT)
       : 0;
 
     if (!this.activeDomain) {
@@ -1320,6 +2264,24 @@ export class FpsMobaEngine {
     // Gojo Primary Fire (M1): Launch a 3D Volumetric Reversal Red Plasma Orb projectile
     if (wep.isProjectileOrb) {
       this.launchReversalRedOrb(muzzleWorld, chargeRatio, shotBaseDamage, shotKnockback);
+      return;
+    }
+
+    // Jogo Primary Fire (M1): Launch fiery homing Ember Insects
+    if (wep.fireMode === 'EMBER_INSECTS') {
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+      const insectDmg = Math.round(shotBaseDamage + (this.level - 1) * 2.5);
+      const insect = new EmberInsectProjectile({
+        startPos: muzzleWorld.clone().addScaledVector(forward, 0.35),
+        forward,
+        damage: insectDmg,
+        team: 'blue',
+        casterId: 'player',
+        casterName: this.hero.name
+      });
+      this.scene.add(insect.mesh);
+      this.projectiles.push(insect);
+      this.spawnImpactRing(muzzleWorld, '#f97316', 0.65);
       return;
     }
 
@@ -1406,122 +2368,19 @@ export class FpsMobaEngine {
     shotBaseDamage: number,
     shotKnockback: number
   ) {
-    const wep = this.hero.weapon;
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-    const flatShotDir = new THREE.Vector3(forward.x, 0, forward.z).normalize();
-    const orbRadius = 0.28 + chargeRatio * 0.42;
-    const speed = 32 + chargeRatio * 12;
-    const vel = forward.clone().multiplyScalar(speed);
-
-    const redOrb = createCursedEnergyOrb({
-      variant: 'RED',
-      radius: orbRadius
+    const dmg = Math.round(shotBaseDamage + (this.level - 1) * 2.5);
+    const proj = new ReversalRedProjectile({
+      startPos,
+      forward,
+      chargeRatio,
+      damage: dmg,
+      knockback: shotKnockback,
+      team: 'blue',
+      casterId: 'player',
+      casterName: this.hero.name
     });
-    redOrb.group.position.copy(startPos);
-    this.scene.add(redOrb.group);
-
-    const maxFlightSec = 2.4;
-    let exploded = false;
-    const stepRay = new THREE.Raycaster();
-
-    const detonate = (impactPos: THREE.Vector3, directUnit?: MobaUnit) => {
-      if (exploded) return;
-      exploded = true;
-
-      const splashRad = 1.9 + chargeRatio * 2.6;
-      this.spawnImpactRing(impactPos, '#ff2a55', splashRad);
-      this.spawnPillarEffect(impactPos, 0.55 + chargeRatio * 0.65, 3.8 + chargeRatio * 2.5, '#f43f5e', 0.35);
-
-      const dmg = Math.round(shotBaseDamage + (this.level - 1) * 2.5);
-      if (directUnit && directUnit.alive) {
-        this.damageUnit(directUnit, dmg, chargeRatio >= 0.75, 'Reversal Red', impactPos);
-        if (shotKnockback > 0 && directUnit.moveSpeed > 0 && directUnit.alive) {
-          this.KnockbackUnitWithWallSlam(
-            directUnit,
-            flatShotDir,
-            shotKnockback,
-            Math.round(22 + chargeRatio * 28)
-          );
-        }
-      }
-
-      // Splash repel to nearby enemies within the Red blast wave
-      for (const u of this.units) {
-        if (!u.alive || u.team !== 'red' || u === directUnit) continue;
-        const unitCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
-        if (unitCenter.distanceTo(impactPos) <= splashRad + u.radius) {
-          this.damageUnit(u, Math.round(dmg * 0.8), chargeRatio >= 0.85, 'Reversal Red', unitCenter);
-          if (shotKnockback > 0 && u.moveSpeed > 0 && u.alive) {
-            const pushDir = u.group.position.clone().sub(impactPos);
-            pushDir.y = 0;
-            if (pushDir.lengthSq() < 0.01) pushDir.copy(flatShotDir);
-            else pushDir.normalize();
-            this.KnockbackUnitWithWallSlam(
-              u,
-              pushDir,
-              shotKnockback * 0.85,
-              Math.round(18 + chargeRatio * 22)
-            );
-          }
-        }
-      }
-    };
-
-    this.vfxList.push({
-      mesh: redOrb.group,
-      age: 0,
-      maxAge: maxFlightSec,
-      onUpdate: (dt, progress) => {
-        if (exploded) {
-          redOrb.group.scale.multiplyScalar(0.65);
-          return;
-        }
-        redOrb.update(dt, this.clock.getElapsedTime());
-
-        const prevPos = redOrb.group.position.clone();
-        const stepDist = speed * dt;
-        redOrb.group.position.addScaledVector(vel, dt);
-
-        // Check collision with domain barriers from the outside
-        for (const dom of this.activeDomains) {
-          const bHit = dom.raycastBarrier(prevPos, forward, stepDist + orbRadius);
-          if (bHit) {
-            detonate(bHit.point);
-            const dmg = Math.round(shotBaseDamage + (this.level - 1) * 2.5);
-            this.damageDomainBarrier(dom, dmg, bHit.point, this.hero.name);
-            return;
-          }
-        }
-
-        // 1. Check direct proximity collision with enemy units
-        for (const u of this.units) {
-          if (!u.alive || u.team !== 'red') continue;
-          const unitCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
-          if (unitCenter.distanceTo(redOrb.group.position) <= u.radius + orbRadius + 0.35) {
-            detonate(redOrb.group.position.clone(), u);
-            return;
-          }
-        }
-
-        // 2. Check obstacle / floor collision along step
-        stepRay.set(prevPos, forward);
-        stepRay.near = 0;
-        stepRay.far = stepDist + orbRadius;
-        const wallHits = stepRay.intersectObjects(this.mapBuilder.raycastObstacles, false);
-        if (wallHits.length > 0) {
-          detonate(wallHits[0].point);
-          return;
-        }
-        if (redOrb.group.position.y <= 0.25) {
-          detonate(redOrb.group.position.clone());
-          return;
-        }
-
-        if (progress >= 0.96) {
-          detonate(redOrb.group.position.clone());
-        }
-      }
-    });
+    this.spawnProjectile(proj);
   }
 
   /**
@@ -1544,217 +2403,33 @@ export class FpsMobaEngine {
     const caster = opts.caster;
     const orbPos =
       opts.startPos?.clone() ?? this.camera.position.clone().add(opts.forward.clone().multiplyScalar(1.5));
-    // Pull-radius indicator only exists once the orb has been manifested & launched
     const pullIndicator = this.createRadiusIndicator(opts.color);
-    const orbVel = opts.forward.clone().multiplyScalar(14.5);
-    const blueOrb = createCursedEnergyOrb({
-      variant: 'BLUE',
-      radius: 0.56
+
+    const blueProj = new LapseBlueProjectile({
+      startPos: orbPos,
+      forward: opts.forward,
+      pullRadius: opts.radius,
+      damage: opts.damage,
+      durationMs: opts.durationMs,
+      abilityName: opts.name,
+      color: opts.color,
+      team: caster?.team ?? 'blue',
+      casterId: caster?.id ?? 'player',
+      casterName: caster?.name ?? this.hero.name,
+      caster: caster ?? null,
+      autoTriggerSec: opts.autoTriggerSec,
+      pullIndicator,
+      placeIndicator: (ind, x, z, r) => this.placeIndicator(ind, x, z, r),
+      onCooldownStart: opts.onCooldownStart,
+      onClearActiveRef: () => {
+        if (!caster && this.activeBlueOrb === blueProj) {
+          this.activeBlueOrb = null;
+        }
+      }
     });
-    blueOrb.group.position.copy(orbPos);
-    this.scene.add(blueOrb.group);
 
-    const PULL_SEC = 0.85;
-    let finished = false;
-    let phase: 'fly' | 'pull' | 'done' = 'fly';
-    let pullT = 0;
-    let flightVfx: Active3DVfx | null = null;
-    const captured: { unit?: MobaUnit; isPlayer?: boolean; delay: number; swirlSign: number }[] = [];
-    let flyT = 0;
-
-    const finishAndCooldown = (removeIndicator = true) => {
-      if (finished) return;
-      finished = true;
-      if (!caster && this.activeBlueOrb?.mesh === blueOrb.group) {
-        this.activeBlueOrb = null;
-      }
-      if (removeIndicator) this.scene.remove(pullIndicator);
-      opts.onCooldownStart();
-    };
-
-    const explode = () => {
-      phase = 'done';
-      this.scene.remove(pullIndicator);
-      const center = blueOrb.group.position.clone();
-      this.spawnImpactRing(center, opts.color, opts.radius * 0.7);
-      this.spawnImpactRing(center, '#e0f2fe', opts.radius * 1.2);
-      this.spawnPillarEffect(center, 0.75 + opts.radius * 0.18, 4.5 + opts.radius * 0.6, '#38bdf8', 0.55);
-
-      const blastRadius = Math.max(2.4, opts.radius * 0.55);
-      const hit = new Set<MobaUnit>();
-      let playerHit = false;
-      for (const c of captured) {
-        if (c.unit) hit.add(c.unit);
-        if (c.isPlayer) playerHit = true;
-      }
-      if (caster) {
-        for (const u of this.units) {
-          if (!u.alive || u === caster || hit.has(u)) continue;
-          if (Math.hypot(center.x - u.group.position.x, center.z - u.group.position.z) <= blastRadius + u.radius) {
-            hit.add(u);
-          }
-        }
-        if (
-          !playerHit &&
-          this.playerRespawnTimer <= 0 &&
-          Math.hypot(center.x - this.playerPos.x, center.z - this.playerPos.z) <= blastRadius + 0.65
-        ) {
-          playerHit = true;
-        }
-        for (const u of hit) {
-          if (!u.alive) continue;
-          u.stunTimer = Math.max(u.stunTimer ?? 0, 0.9);
-          u.hp = Math.max(1, u.hp - opts.damage);
-        }
-        if (playerHit && this.playerRespawnTimer <= 0) {
-          this.applyDamageToPlayer(opts.damage, `${caster.name} (${opts.name})`, caster.team);
-        }
-        return;
-      }
-      for (const u of this.units) {
-        if (!u.alive || u.team !== 'red' || hit.has(u)) continue;
-        if (Math.hypot(center.x - u.group.position.x, center.z - u.group.position.z) <= blastRadius + u.radius) {
-          hit.add(u);
-        }
-      }
-      let hitCount = 0;
-      for (const u of hit) {
-        if (!u.alive) continue;
-        hitCount++;
-        u.stunTimer = Math.max(u.stunTimer ?? 0, 0.9);
-        this.damageUnit(
-          u,
-          opts.damage,
-          false,
-          opts.name,
-          u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.6, 0))
-        );
-      }
-      this.grantAbilityPassive(hitCount > 0);
-    };
-
-    const triggerAttract = () => {
-      if (finished) return;
-      finishAndCooldown(false);
-      phase = 'pull';
-      pullT = 0;
-      // Extend the flight VFX lifetime so the orb survives the full pull phase
-      if (flightVfx) flightVfx.maxAge = flightVfx.age + PULL_SEC + 0.6;
-
-      const center = blueOrb.group.position;
-      this.spawnImpactRing(center, opts.color, opts.radius * 0.5);
-      for (const u of this.units) {
-        if (!u.alive) continue;
-        if (caster ? u === caster : u.team !== 'red') continue;
-        const horizDist = Math.hypot(center.x - u.group.position.x, center.z - u.group.position.z);
-        if (horizDist <= opts.radius + u.radius) {
-          // Farther targets are caught slightly later, so the pull ripples outward-in
-          captured.push({
-            unit: u,
-            delay: (horizDist / opts.radius) * 0.22,
-            swirlSign: Math.random() < 0.5 ? -1 : 1
-          });
-        }
-      }
-      if (caster && this.playerRespawnTimer <= 0) {
-        const pd = Math.hypot(center.x - this.playerPos.x, center.z - this.playerPos.z);
-        if (pd <= opts.radius + 0.65) {
-          captured.push({
-            isPlayer: true,
-            delay: (pd / opts.radius) * 0.22,
-            swirlSign: Math.random() < 0.5 ? -1 : 1
-          });
-        }
-      }
-    };
-
-    if (!caster) this.activeBlueOrb = { mesh: blueOrb.group, triggerAttract };
-
-    flightVfx = {
-      mesh: blueOrb.group,
-      age: 0,
-      maxAge: opts.durationMs / 1000,
-      onUpdate: (dt, progress) => {
-        const now = this.clock.getElapsedTime();
-
-        if (phase === 'pull') {
-          pullT += dt;
-          const k = Math.min(1, pullT / PULL_SEC);
-          blueOrb.update(dt, now);
-          // Orb swells & pulses while the indicator collapses inward
-          blueOrb.group.scale.setScalar(1 + 0.45 * k * k + Math.sin(pullT * 28) * 0.05 * k);
-          pullIndicator.scale.set(
-            opts.radius * (1 - 0.7 * k * k),
-            1,
-            opts.radius * (1 - 0.7 * k * k)
-          );
-          pullIndicator.rotation.y += dt * (2 + k * 9);
-
-          const center = blueOrb.group.position;
-          for (const c of captured) {
-            const u = c.unit;
-            if (u && !u.alive) continue;
-            const t = Math.max(0, pullT - c.delay);
-            if (t <= 0) continue;
-            const kk = Math.min(1, t / (PULL_SEC - c.delay));
-            const px = u ? u.group.position.x : this.playerPos.x;
-            const pz = u ? u.group.position.z : this.playerPos.z;
-            const pr = u ? u.radius : 0.65;
-            const py = u ? u.group.position.y : this.playerPos.y;
-            if (u) u.stunTimer = Math.max(u.stunTimer ?? 0, 0.2);
-            const dx = center.x - px;
-            const dz = center.z - pz;
-            const d = Math.hypot(dx, dz);
-            if (d < 0.8) continue;
-            // Starts as a gentle drift and accelerates; slight tangential swirl
-            const speed = 1.4 + 15 * kk * kk;
-            const nx = dx / d;
-            const nz = dz / d;
-            const swirl = 0.38 * (1 - kk) * c.swirlSign;
-            const mx = (nx - nz * swirl) * speed * dt;
-            const mz = (nz + nx * swirl) * speed * dt;
-            const resolved = this.mapBuilder.resolveHorizontalCollision(px + mx, pz + mz, pr, py);
-            if (u) {
-              u.group.position.x = resolved.x;
-              u.group.position.z = resolved.z;
-              this.clampUnitToDomainBarrier(u);
-              u.group.position.y = this.mapBuilder.getFloorHeight(
-                u.group.position.x,
-                u.group.position.z,
-                u.group.position.y
-              );
-            } else {
-              this.playerPos.x = resolved.x;
-              this.playerPos.z = resolved.z;
-            }
-          }
-
-          if (pullT >= PULL_SEC) explode();
-          return;
-        }
-
-        if (phase === 'done' || finished) {
-          blueOrb.group.scale.multiplyScalar(0.72);
-          return;
-        }
-
-        blueOrb.update(dt, now);
-        blueOrb.group.position.addScaledVector(orbVel, dt);
-        if (blueOrb.group.position.y < 1.15) blueOrb.group.position.y = 1.15;
-        this.placeIndicator(pullIndicator, blueOrb.group.position.x, blueOrb.group.position.z, opts.radius);
-
-        flyT += dt;
-        if (opts.autoTriggerSec !== undefined && flyT >= opts.autoTriggerSec) {
-          triggerAttract();
-          return;
-        }
-
-        if (progress >= 0.96) {
-          finishAndCooldown();
-        }
-      }
-    };
-    this.vfxList.push(flightVfx);
+    if (!caster) this.activeBlueOrb = blueProj;
+    this.spawnProjectile(blueProj);
   }
 
   /**
@@ -1773,6 +2448,7 @@ export class FpsMobaEngine {
     // Spawn 3D horizontal cleave wave arc in front of camera
     const slashPos = this.playerPos.clone().add(new THREE.Vector3(0, 1.35, 0)).addScaledVector(forward, range * 0.42);
     this.spawnMeleeArcVfx(slashPos, range * 0.6, this.hero.color);
+    this.physicsWorld?.applyRadialImpulse(slashPos, range * 0.85, 16 + knockbackDist * 2.2, 0.35, 28);
 
     let hitAny = false;
     for (const u of this.units) {
@@ -1834,6 +2510,12 @@ export class FpsMobaEngine {
     } else if (this.hero.id === 'mr_biomaster') {
       this.shield = Math.min(200, this.shield + 25);
       this.mana = Math.min(this.maxMana, this.mana + 10);
+    } else if (this.hero.id === 'jogo') {
+      this.shield = Math.min(200, this.shield + 15);
+      this.mana = Math.min(this.maxMana, this.mana + 8);
+    } else if (this.hero.id === 'uro') {
+      this.shield = Math.min(200, this.shield + 20);
+      this.mana = Math.min(this.maxMana, this.mana + 12);
     }
   }
 
@@ -1857,9 +2539,15 @@ export class FpsMobaEngine {
   //  Overwatch-Style Special Abilities (SHIFT / E / Q)
   // ─────────────────────────────────────────────────────────────
   private tryCastAbility(key: FpsAbilityKey) {
-    if (this.teleportPhase !== 'NONE') return;
+    if (this.teleportPhase !== 'NONE' || this.meteorAiming) return;
     const ab = this.hero.abilities[key];
     const cd = this.cooldowns[key];
+
+    // Pressing SHIFT again while submerged in Shadow Step emerges early
+    if (key === 'SHIFT' && ab.kind === 'SHADOW_STEP' && this.shadowStepTimer > 0) {
+      this.exitShadowStep();
+      return;
+    }
 
     // Gojo inside his active Domain Expansion: pressing Q activates Hollow Technique: Purple (1-hit kill)
     if (
@@ -1873,26 +2561,75 @@ export class FpsMobaEngine {
       return;
     }
 
+    // Megumi inside Chimera Shadow Garden: pressing Q summons Mahoraga (ends Domain)
+    if (
+      key === 'Q' &&
+      this.activeDomain?.isMegumiDomain &&
+      !this.activeDomain.purpleTriggered
+    ) {
+      if (!this.canSpendCursedEnergy()) return;
+      this.exitShadowStep();
+      this.consumeCursedEnergy(35);
+      this.viewModel.triggerCastGesture();
+      this.summonMahoraga();
+      return;
+    }
+
+    // Uro Takako inside Sky Veil Horizon: pressing Q unleashes Maximum: Shattered Sky (ends Domain)
+    if (
+      key === 'Q' &&
+      this.activeDomain?.isUroDomain &&
+      !this.activeDomain.purpleTriggered
+    ) {
+      if (!this.canSpendCursedEnergy()) return;
+      this.consumeCursedEnergy(35);
+      this.viewModel.triggerCastGesture();
+      this.triggerShatteredSky();
+      return;
+    }
+
     // Gojo's E is Infinity [Hold E], managed continuously via isBarrierActive()
     if (ab.kind === 'INFINITY_SHIELD') {
       return;
     }
 
-    // Two-stage GRAVITY_ORB: 2nd press detonates active orb & attracts within radius
+    // Two-stage GRAVITY_ORB: 2nd press detonates active orb & attracts within radius (Free - already paid on cast)
     if (ab.kind === 'GRAVITY_ORB' && this.activeBlueOrb) {
-      if (!this.canSpendCursedEnergy()) return;
-      this.consumeCursedEnergy(10);
       this.viewModel.triggerCastGesture();
-      this.activeBlueOrb.triggerAttract();
+      this.activeBlueOrb.triggerAttract(this.getProjectileContext());
       return;
     }
 
-    if (cd.remainingMs > 0 || !this.canSpendCursedEnergy()) return;
+    const hasCharge =
+      cd.maxCharges && cd.maxCharges > 1 ? (cd.charges ?? 0) > 0 : cd.remainingMs <= 0;
+    if (!hasCharge || !this.canSpendCursedEnergy()) return;
+
+    if (ab.kind !== 'SHADOW_STEP') {
+      this.exitShadowStep();
+    }
 
     this.consumeCursedEnergy(ab.manaCost);
-    const isGojoDomainCast = ab.kind === 'DOMAIN_ULT' && this.hero.id === 'gojo';
-    if (ab.kind !== 'GRAVITY_ORB' && !isGojoDomainCast) {
-      cd.remainingMs = ab.cooldownMs;
+    const isDomainWithFinisher =
+      ab.kind === 'DOMAIN_ULT' &&
+      (this.hero.id === 'gojo' ||
+        this.hero.id === 'jogo' ||
+        this.hero.id === 'megumi' ||
+        this.hero.id === 'uro');
+    if (cd.maxCharges && cd.maxCharges > 1) {
+      cd.charges = Math.max(0, (cd.charges ?? cd.maxCharges) - 1);
+      if (cd.remainingMs <= 0) {
+        cd.remainingMs =
+          ab.kind === 'SKY_PULL' && this.activeDomain?.isUroDomain
+            ? Math.round(ab.cooldownMs * 0.6)
+            : ab.cooldownMs;
+      }
+    } else if (ab.kind !== 'GRAVITY_ORB' && !isDomainWithFinisher) {
+      cd.remainingMs =
+        (ab.kind === 'NUE_TOAD' || ab.kind === 'RABBIT_ESCAPE_NUE') && this.activeDomain?.isMegumiDomain
+          ? 2500
+          : ab.kind === 'THIN_ICE_BREAKER' && this.activeDomain?.isUroDomain
+            ? 2800
+            : ab.cooldownMs;
     }
     this.viewModel.triggerCastGesture();
 
@@ -1900,6 +2637,66 @@ export class FpsMobaEngine {
     const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
 
     switch (ab.kind) {
+      // ── MEGUMI: SHADOW STEP (sink into floor shadows, undetected + instant reload) ──
+      case 'SHADOW_STEP': {
+        this.enterShadowStep(ab.durationMs / 1000);
+        break;
+      }
+
+      // ── MEGUMI: RABBIT ESCAPE -> HOLD SPACE NUE FLIGHT COMBO ──
+      case 'RABBIT_ESCAPE_NUE': {
+        this.summonRabbitEscape();
+        break;
+      }
+
+      // ── MEGUMI: NUE (AOE STUN SWOOP) / TOAD (ALLY TONGUE RESCUE PULL) ──
+      case 'NUE_TOAD': {
+        this.castNueOrToad(ab);
+        break;
+      }
+      // ── JOGO: FLAME DASH (2-charge mobility burst, 4s recharge per charge) ──
+      case 'FLAME_DASH': {
+        let moveForward = 0;
+        let moveRight = 0;
+        if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) moveForward += 1;
+        if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) moveForward -= 1;
+        if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) moveRight += 1;
+        if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) moveRight -= 1;
+        const rightVec = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+        const dashDir = new THREE.Vector3()
+          .addScaledVector(flatForward, moveForward)
+          .addScaledVector(rightVec, moveRight);
+        if (dashDir.lengthSq() < 0.01) {
+          dashDir.copy(flatForward);
+        } else {
+          dashDir.normalize();
+        }
+        this.flameDashDir.copy(dashDir);
+        this.flameDashTimer = ab.durationMs / 1000;
+        const origin = this.playerPos.clone().add(new THREE.Vector3(0, 0.9, 0));
+        this.spawnImpactRing(origin, ab.color, 2.2);
+        this.spawnCursedBurst(origin, 'FIRE', 1.35, 36);
+        break;
+      }
+
+      // ── JOGO: WALL-STICKING MINI VOLCANO (180° frontal firing turret) ──
+      case 'MINI_VOLCANO': {
+        const muzzle = new THREE.Vector3(0.28, -0.18, -0.75).applyMatrix4(this.camera.matrixWorld);
+        const seed = new VolcanoSeedProjectile({
+          startPos: muzzle,
+          forward,
+          damage: ab.damage,
+          detectRadius: ab.radius,
+          volcanoDurationMs: ab.durationMs,
+          team: 'blue',
+          casterId: 'player',
+          casterName: this.hero.name
+        });
+        this.scene.add(seed.mesh);
+        this.projectiles.push(seed);
+        this.spawnImpactRing(muzzle, ab.color, 0.9);
+        break;
+      }
       // ── HIGURUMA / REINHARDT: EXTENDED GAVEL RUSH (CRUSADER CHARGE) ──
       case 'CRUSADER_CHARGE': {
         const startPos = this.playerPos.clone().add(new THREE.Vector3(0, 1.1, 0));
@@ -2222,6 +3019,30 @@ export class FpsMobaEngine {
         break;
       }
 
+      // ── URO TAKAKO: SKY PULL (grab the sky & yank yourself along 3D look direction) ──
+      case 'SKY_PULL': {
+        const pullDir = forward.clone().normalize();
+        // If standing on the floor and looking flat/slightly down, lift cleanly into the sky
+        if (this.grounded && pullDir.y < 0.28) {
+          pullDir.y = 0.34;
+          pullDir.normalize();
+        }
+        this.skyPullDir.copy(pullDir);
+        this.skyPullTimer = Math.max(0.22, ab.durationMs / 1000);
+        this.skyPullBoostTimer = 0.65;
+        this.grounded = false;
+        const originRing = this.playerPos.clone().add(new THREE.Vector3(0, 1.1, 0));
+        this.spawnImpactRing(originRing, ab.color, 3.6);
+        this.spawnCursedBurst(originRing, 'SKY', 1.9, 44);
+        break;
+      }
+
+      // ── URO TAKAKO: THIN ICE BREAKER (shatter the surface of the sky like thin ice) ──
+      case 'THIN_ICE_BREAKER': {
+        this.executeThinIceBreaker(ab, forward);
+        break;
+      }
+
       case 'RALLY_ULT':
       case 'DOMAIN_ULT': {
         this.activateDomainExpansion(ab, ab.kind === 'RALLY_ULT');
@@ -2230,18 +3051,182 @@ export class FpsMobaEngine {
     }
   }
 
+  private spawnThinIceShatterVfx(pos: THREE.Vector3, normal: THREE.Vector3, radius: number, durationSec = 0.72) {
+    const shatter = createThinIceShatterEffect(pos, normal, radius);
+    this.scene.add(shatter.group);
+    this.vfxList.push({
+      mesh: shatter.group,
+      age: 0,
+      maxAge: durationSec,
+      onUpdate: (dt, progress) => {
+        shatter.update(dt, progress);
+      }
+    });
+  }
+
+  private executeThinIceBreaker(ab: FpsAbilityDef, forward: THREE.Vector3) {
+    const rayOrigin = this.camera.position.clone();
+    const maxRange = 14.5;
+    let impactPos = rayOrigin.clone().addScaledVector(forward, 7.2);
+    let bestDist = maxRange;
+
+    // 1. Check enemy Domain barriers first — Thin Ice Breaker deals 2x barrier-shatter damage!
+    for (const dom of this.activeDomains) {
+      if (dom.isCollapsed || dom.casterTeam === 'blue') continue;
+      const hit = dom.raycastBarrier(rayOrigin, forward, bestDist);
+      if (hit && hit.distance < bestDist) {
+        bestDist = hit.distance;
+        impactPos = hit.point.clone();
+        const barrierDmg = Math.round((ab.damage + (this.level - 1) * 8) * 2.0);
+        this.damageDomainBarrier(dom, barrierDmg, hit.point, `${this.hero.name} (Thin Ice Breaker)`);
+      }
+    }
+
+    // 2. Snap to closest enemy unit along Uro's sightline within 14.5m
+    const targetMeshes = this.getEnemyHitMeshes();
+    if (targetMeshes.length > 0) {
+      const ray = new THREE.Raycaster(rayOrigin, forward, 0, bestDist);
+      const hits = ray.intersectObjects(targetMeshes, false);
+      if (hits.length > 0) {
+        bestDist = hits[0].distance;
+        impactPos = hits[0].point.clone();
+      }
+    }
+
+    // 3. Or snap to arena terrain/pillar surface
+    const worldRay = new THREE.Raycaster(rayOrigin, forward, 0, bestDist);
+    const worldHits = worldRay.intersectObjects(this.mapBuilder.raycastObstacles, false);
+    if (worldHits.length > 0 && worldHits[0].distance < bestDist) {
+      impactPos = worldHits[0].point.clone();
+    }
+
+    // Crystalline spatial fracture visuals + physics demolition
+    const inDomain = Boolean(this.activeDomain?.isUroDomain);
+    const shatterRadius = inDomain ? ab.radius * 1.25 : ab.radius;
+    this.spawnThinIceShatterVfx(impactPos, forward, shatterRadius, 0.78);
+    this.spawnImpactRing(impactPos, '#67e8f9', shatterRadius);
+    this.spawnCursedBurst(impactPos, 'SKY', shatterRadius * 0.45, 78);
+    this.physicsWorld?.applyRadialImpulse(impactPos, shatterRadius * 1.5, 42, 0.55, 140);
+
+    // Damage all enemies inside the fractured sky shockwave (bypasses NPC shields/guards!)
+    const dmg = Math.round((ab.damage + (this.level - 1) * 7) * (inDomain ? 1.25 : 1.0));
+    let anyHit = false;
+    for (const u of this.units) {
+      if (!u.alive || u.team !== 'red') continue;
+      const uCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.5, 0));
+      const d = uCenter.distanceTo(impactPos);
+      if (d <= shatterRadius + u.radius) {
+        anyHit = true;
+        // Pierces active NPC guard/shield
+        if (u.npcShieldTimer && u.npcShieldTimer > 0) {
+          u.npcShieldTimer = 0;
+        }
+        this.damageUnit(u, dmg, d <= shatterRadius * 0.5, ab.name, uCenter, 'Thin Ice Breaker');
+        const pushDir = uCenter.clone().sub(impactPos);
+        if (pushDir.lengthSq() < 0.01) pushDir.copy(forward);
+        pushDir.y = 0;
+        if (pushDir.lengthSq() > 0.001) {
+          pushDir.normalize();
+          this.KnockbackUnitWithWallSlam(u, pushDir, 6.5, 25);
+        }
+        u.verticalVel = Math.max(u.verticalVel ?? 0, 5.5);
+      }
+    }
+    this.grantAbilityPassive(anyHit);
+  }
+
+  private triggerShatteredSky() {
+    const dom = this.activeDomain;
+    if (!dom || !dom.isUroDomain) return;
+    dom.purpleTriggered = true;
+
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    const targetPt = this.getAimGroundPoint(22);
+    // Keep cataclysm within Uro's domain perimeter
+    const dx = targetPt.x - dom.center.x;
+    const dz = targetPt.z - dom.center.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > dom.radius * 0.85) {
+      targetPt.x = dom.center.x + (dx / dist) * (dom.radius * 0.85);
+      targetPt.z = dom.center.z + (dz / dist) * (dom.radius * 0.85);
+    }
+    const burstPos = targetPt.clone().add(new THREE.Vector3(0, 1.8, 0));
+
+    // Massive triple-plane Thin Ice Breaker cataclysm
+    const shatterRadius = 15.5;
+    this.spawnThinIceShatterVfx(burstPos, forward, shatterRadius, 1.1);
+    this.spawnThinIceShatterVfx(burstPos.clone().add(new THREE.Vector3(0, 1.4, 0)), new THREE.Vector3(0, 1, 0), shatterRadius * 0.9, 1.0);
+    this.spawnImpactRing(targetPt.clone().add(new THREE.Vector3(0, 0.25, 0)), '#67e8f9', shatterRadius);
+    this.spawnCursedBurst(burstPos, 'SKY', 4.6, 130);
+    this.physicsWorld?.applyRadialImpulse(burstPos, shatterRadius * 1.35, 68, 0.75, 240);
+
+    const dmg = Math.round(240 + (this.level - 1) * 14);
+    let anyHit = false;
+    for (const u of this.units) {
+      if (!u.alive || u.team !== 'red') continue;
+      const uCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.5, 0));
+      const d = Math.hypot(u.group.position.x - targetPt.x, u.group.position.z - targetPt.z);
+      if (d <= shatterRadius + u.radius) {
+        anyHit = true;
+        u.stunTimer = Math.max(u.stunTimer ?? 0, 1.4);
+        this.damageUnit(u, dmg, true, 'Maximum: Shattered Sky', uCenter, 'Maximum: Shattered Sky');
+        const push = uCenter.clone().sub(burstPos);
+        push.y = 0;
+        if (push.lengthSq() > 0.01) {
+          push.normalize();
+          this.KnockbackUnitWithWallSlam(u, push, 9.5, 35);
+        }
+        u.verticalVel = Math.max(u.verticalVel ?? 0, 11.0);
+      }
+    }
+    this.grantAbilityPassive(anyHit);
+
+    this.damagePopups.push({
+      id: this.popupCounter++,
+      x: 50,
+      y: 35,
+      amount: 0,
+      label: 'MAXIMUM: SHATTERED SKY!',
+      isCrit: true,
+      color: '#67e8f9',
+      ageSec: 0,
+      opacity: 1
+    });
+    if (this.damagePopups.length > 10) this.damagePopups.shift();
+
+    this.endActiveDomain();
+  }
+
   private activateDomainExpansion(ab: FpsAbilityDef, isRally = false) {
     if (this.activeDomain) {
       this.endActiveDomain();
     }
 
+    // Whenever a domain is expanded, their cursed energy bar gets filled up
+    this.mana = this.maxMana;
+    this.manaExhaustedTimerSec = 0;
+    this.damagePopups.push({
+      id: this.popupCounter++,
+      x: 50,
+      y: 40,
+      amount: 0,
+      label: 'DOMAIN EXPANSION: CURSED ENERGY MAXED',
+      isCrit: true,
+      color: '#38bdf8',
+      ageSec: 0,
+      opacity: 1
+    });
+
     const isGojoDomain = this.hero.id === 'gojo' && !isRally;
+    const isJogoDomain = this.hero.id === 'jogo' && !isRally;
+    const isMegumiDomain = this.hero.id === 'megumi' && !isRally;
+    const isUroDomain = this.hero.id === 'uro' && !isRally;
     const dom = new DomainExpansion({
       name: ab.name,
       casterId: 'player',
       casterName: this.hero.name,
       casterTeam: 'blue',
-      center: this.playerPos.clone(),
+      center: new THREE.Vector3(this.playerPos.x, isRally ? this.playerPos.y : 0, this.playerPos.z),
       radius: ab.radius,
       durationMs: ab.durationMs,
       color: ab.color,
@@ -2249,6 +3234,9 @@ export class FpsMobaEngine {
       barrierMaxHp: 1200,
       isDestructable: true,
       isGojoDomain,
+      isJogoDomain,
+      isMegumiDomain,
+      isUroDomain,
       isRally,
       scene: this.scene,
       initialUnits: this.units,
@@ -2260,7 +3248,56 @@ export class FpsMobaEngine {
       if (this.playerDomainAudio) {
         try { this.playerDomainAudio.stop(); } catch {}
       }
+      if (this.playerVoiceAudio) {
+        try { this.playerVoiceAudio.stop(); } catch {}
+      }
+      this.playerVoiceAudio = this.playGlobalSound('/assets/sounds/gojo/de_voice.mp3', { volume: 1.0 });
       this.playerDomainAudio = this.playGlobalSound('/assets/sounds/gojo/unlimited_void.mp3', { volume: 0.85 });
+    }
+  }
+
+  /**
+   * Whenever a domain is over (expired naturally, shattered by damage, or ended via finisher),
+   * the caster loses all cursed energy and enters technique burnout.
+   */
+  private onDomainEnded(dom: DomainExpansion) {
+    if (dom.casterId === 'player') {
+      this.cancelMeteorAim();
+      this.mana = 0;
+      this.manaExhaustedTimerSec = CE_EXHAUSTION_LOCKOUT_SEC;
+      this.isChargingPrimary = false;
+      this.primaryChargeMs = 0;
+      this.isChargingPunch = false;
+      this.punchChargeMs = 0;
+      this.cancelBlueCharge();
+      if (this.hero.abilities.E.kind === 'INFINITY_SHIELD') {
+        this.cooldowns.E.remainingMs = Math.max(
+          this.cooldowns.E.remainingMs,
+          CE_EXHAUSTION_LOCKOUT_SEC * 1000
+        );
+      }
+      this.cooldowns.Q.remainingMs = this.hero.abilities.Q.cooldownMs;
+      this.damagePopups.push({
+        id: this.popupCounter++,
+        x: 50,
+        y: 40,
+        amount: 0,
+        label: 'BURNOUT · TECHNIQUE EXHAUSTED',
+        isCrit: false,
+        color: '#f43f5e',
+        ageSec: 0,
+        opacity: 1
+      });
+    } else {
+      const casterUnit = this.units.find((u) => u.id === dom.casterId);
+      if (casterUnit && casterUnit.npcAi) {
+        casterUnit.npcAi.ce = 0;
+        casterUnit.npcAi.burnout = CE_EXHAUSTION_LOCKOUT_SEC;
+        casterUnit.npcAi.infinityHold = 0;
+        casterUnit.npcShieldTimer = 0;
+        casterUnit.npcAi.cd.domain = (casterUnit.heroDef?.abilities.Q.cooldownMs ?? 24000) / 1000;
+        casterUnit.npcAi.busy = Math.max(casterUnit.npcAi.busy, 0.5);
+      }
     }
   }
 
@@ -2268,20 +3305,27 @@ export class FpsMobaEngine {
     const dom = this.activeDomain;
     if (!dom) return;
     const wasGojoDomain = dom.isGojoDomain;
-    if (wasGojoDomain && this.playerDomainAudio) {
-      try {
-        this.playerDomainAudio.stop();
-        this.playerDomainAudio.disconnect();
-      } catch {}
-      this.playerDomainAudio = null;
+    if (wasGojoDomain) {
+      if (this.playerDomainAudio) {
+        try {
+          this.playerDomainAudio.stop();
+          this.playerDomainAudio.disconnect();
+        } catch {}
+        this.playerDomainAudio = null;
+      }
+      if (this.playerVoiceAudio && !dom.purpleTriggered) {
+        try {
+          this.playerVoiceAudio.stop();
+          this.playerVoiceAudio.disconnect();
+        } catch {}
+        this.playerVoiceAudio = null;
+      }
     }
+    this.onDomainEnded(dom);
     dom.cleanup(this.scene);
     const idx = this.activeDomains.indexOf(dom);
     if (idx !== -1) {
       this.activeDomains.splice(idx, 1);
-    }
-    if (wasGojoDomain) {
-      this.cooldowns.Q.remainingMs = this.hero.abilities.Q.cooldownMs;
     }
   }
 
@@ -2327,7 +3371,7 @@ export class FpsMobaEngine {
   ) {
     const res = dom.takeBarrierDamage(damage);
     this.spawnImpactRing(hitPoint, dom.color, 1.8);
-    this.spawnPillarEffect(hitPoint, 0.35, 1.8, '#38bdf8', 0.25);
+    this.spawnCursedBurst(hitPoint, 'BLUE', 1.1, 32);
     this.hitMarkerAlpha = 1.0;
 
     const projected = hitPoint.clone().project(this.camera);
@@ -2358,12 +3402,21 @@ export class FpsMobaEngine {
    */
   private shatterDomain(dom: DomainExpansion, breakerName?: string) {
     dom.isCollapsed = true;
-    if (dom.isGojoDomain && dom.casterId === 'player' && this.playerDomainAudio) {
-      try {
-        this.playerDomainAudio.stop();
-        this.playerDomainAudio.disconnect();
-      } catch {}
-      this.playerDomainAudio = null;
+    if (dom.isGojoDomain && dom.casterId === 'player') {
+      if (this.playerDomainAudio) {
+        try {
+          this.playerDomainAudio.stop();
+          this.playerDomainAudio.disconnect();
+        } catch {}
+        this.playerDomainAudio = null;
+      }
+      if (this.playerVoiceAudio && !dom.purpleTriggered) {
+        try {
+          this.playerVoiceAudio.stop();
+          this.playerVoiceAudio.disconnect();
+        } catch {}
+        this.playerVoiceAudio = null;
+      }
     }
     this.spawnImpactRing(dom.center.clone().add(new THREE.Vector3(0, 0.2, 0)), dom.color, dom.radius * 1.35);
     this.spawnTransmissionStreaks(dom.center, 'burst', 1.0);
@@ -2381,19 +3434,7 @@ export class FpsMobaEngine {
       opacity: 1
     });
 
-    if (dom.casterId === 'player') {
-      this.manaExhaustedTimerSec = CE_EXHAUSTION_LOCKOUT_SEC;
-      this.mana = 0;
-      this.cooldowns.Q.remainingMs = this.hero.abilities.Q.cooldownMs;
-    } else {
-      const casterUnit = this.units.find((u) => u.id === dom.casterId);
-      if (casterUnit && casterUnit.npcAi) {
-        casterUnit.npcAi.burnout = CE_EXHAUSTION_LOCKOUT_SEC;
-        casterUnit.npcAi.ce = 0;
-        casterUnit.npcAi.cd.domain = 20.0;
-        casterUnit.npcAi.busy = 0.5;
-      }
-    }
+    this.onDomainEnded(dom);
 
     dom.cleanup(this.scene);
     const idx = this.activeDomains.indexOf(dom);
@@ -2409,102 +3450,26 @@ export class FpsMobaEngine {
   private triggerHollowPurple() {
     if (!this.activeDomain || this.activeDomain.purpleTriggered) return;
     this.activeDomain.purpleTriggered = true;
-    this.viewModel.triggerCastGesture();
-    this.playGlobalSound('/assets/sounds/gojo/hollow_purple_start.mp3', { volume: 1.0 });
+    this.viewModel.triggerHollowPurple();
+    if (this.playerVoiceAudio) {
+      try {
+        this.playerVoiceAudio.stop();
+        this.playerVoiceAudio.disconnect();
+      } catch {}
+      this.playerVoiceAudio = null;
+    }
+    this.playerVoiceAudio = this.playGlobalSound('/assets/sounds/gojo/murasaki.mp3', { volume: 0.5 });
 
-    const fusionGroup = new THREE.Group();
-    const redOrb = createCursedEnergyOrb({ variant: 'RED', radius: 0.5 });
-    const blueOrb = createCursedEnergyOrb({ variant: 'BLUE', radius: 0.5 });
-    const purpleOrb = createCursedEnergyOrb({ variant: 'PURPLE', radius: 1.75 });
-    purpleOrb.group.visible = false;
-
-    fusionGroup.add(redOrb.group, blueOrb.group, purpleOrb.group);
-    this.scene.add(fusionGroup);
-
-    const fusionDuration = 0.78;
-    const totalDuration = 3.1;
-    let launched = false;
-    const launchDir = new THREE.Vector3();
-    const hitUnits = new Set<MobaUnit>();
-
-    this.vfxList.push({
-      mesh: fusionGroup,
-      age: 0,
-      maxAge: totalDuration,
-      onUpdate: (dt, progress) => {
-        const now = this.clock.getElapsedTime();
-        const ageSec = progress * totalDuration;
-        if (ageSec < fusionDuration) {
-          // Phase 1: Shader Red (left) and Blue (right) spiral and fuse together in front of Gojo
-          const t = ageSec / fusionDuration;
-          const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-          const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion).normalize();
-          const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion).normalize();
-
-          const anchor = this.camera.position.clone().addScaledVector(forward, 2.8);
-          fusionGroup.position.copy(anchor);
-
-          const sep = (1 - t * t) * 1.55;
-          const swirlAngle = t * Math.PI * 2.5;
-          const offsetX = Math.cos(swirlAngle) * sep;
-          const offsetY = Math.sin(swirlAngle) * sep * 0.45;
-
-          redOrb.group.position
-            .set(0, 0, 0)
-            .addScaledVector(right, -offsetX)
-            .addScaledVector(up, offsetY);
-          blueOrb.group.position
-            .set(0, 0, 0)
-            .addScaledVector(right, offsetX)
-            .addScaledVector(up, -offsetY);
-          redOrb.update(dt, now);
-          blueOrb.update(dt, now);
-
-          if (t > 0.62) {
-            purpleOrb.group.visible = true;
-            const pScale = ((t - 0.62) / 0.38) * 0.78;
-            purpleOrb.setScale(Math.max(0.05, pScale));
-            purpleOrb.update(dt, now);
-          }
-        } else {
-          // Phase 2: Red + Blue combine into Hollow Purple -> launch forward & end Domain Expansion!
-          if (!launched) {
-            launched = true;
-            redOrb.group.visible = false;
-            blueOrb.group.visible = false;
-            purpleOrb.group.visible = true;
-            purpleOrb.setScale(1.0);
-            launchDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-            this.viewModel.triggerFireRecoil();
-            this.spawnImpactRing(fusionGroup.position.clone(), '#a855f7', 6.5);
-            this.endActiveDomain();
-          }
-
-          purpleOrb.update(dt, now);
-          fusionGroup.position.addScaledVector(launchDir, 26.0 * dt);
-          if (fusionGroup.position.y < 1.5) fusionGroup.position.y = 1.5;
-
-          // Obliterate any enemy within 4.2m of the Hollow Purple singularity (One-Hit Kill)
-          for (const u of this.units) {
-            if (!u.alive || u.team !== 'red' || hitUnits.has(u)) continue;
-            const unitCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.5, 0));
-            if (unitCenter.distanceTo(fusionGroup.position) <= 4.2 + u.radius) {
-              hitUnits.add(u);
-              this.spawnImpactRing(unitCenter, '#a855f7', 5.5);
-              this.spawnPillarEffect(u.group.position, 1.8, 12, '#a855f7', 0.8);
-              this.damageUnit(
-                u,
-                Math.max(9999, u.hp + u.maxHp),
-                true,
-                'HOLLOW PURPLE',
-                unitCenter,
-                'HOLLOW PURPLE'
-              );
-            }
-          }
-        }
-      }
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    const startPos = this.camera.position.clone().addScaledVector(forward, 2.8);
+    const purpleProj = new HollowPurpleProjectile({
+      startPos,
+      forward,
+      team: 'blue',
+      casterId: 'player',
+      casterName: this.hero.name
     });
+    this.spawnProjectile(purpleProj);
   }
 
   private getAimGroundPoint(maxDist: number): THREE.Vector3 {
@@ -2623,8 +3588,18 @@ export class FpsMobaEngine {
       }
       return;
     }
-    unit.hp = Math.max(0, unit.hp - amount);
-    unit.outOfCombatTimer = 4.0;
+    let finalAmount = amount;
+    let effectiveLabel = customLabel;
+    if (unit instanceof ShikigamiEntity) {
+      const mod = unit.modifyIncomingDamage(amount, sourceName, hitWorldPos, this.getShikigamiContext());
+      finalAmount = mod.finalDamage;
+      if (mod.popupLabel) {
+        effectiveLabel = mod.popupLabel;
+      }
+    }
+
+    unit.hp = Math.max(0, unit.hp - finalAmount);
+    unit.outOfCombatTimer = 5.0;
 
     this.hitMarkerAlpha = 1.0;
     this.hitMarkerCrit = isCrit;
@@ -2637,10 +3612,10 @@ export class FpsMobaEngine {
         id: this.popupCounter++,
         x: THREE.MathUtils.clamp(sx + (Math.random() - 0.5) * 4, 10, 90),
         y: THREE.MathUtils.clamp(sy + (Math.random() - 0.5) * 4, 10, 90),
-        amount,
-        label: customLabel,
+        amount: finalAmount,
+        label: effectiveLabel,
         isCrit,
-        color: isCrit ? '#facc15' : this.hero.color,
+        color: effectiveLabel?.startsWith('ADAPTED') ? '#facc15' : isCrit ? '#facc15' : this.hero.color,
         ageSec: 0,
         opacity: 1
       });
@@ -2655,6 +3630,9 @@ export class FpsMobaEngine {
       if (this.hero.id === 'higuruma' || this.hero.id === 'titan') {
         this.shield = Math.min(200, this.shield + 15);
         this.mana = Math.min(this.maxMana, this.mana + 8);
+      } else if (this.hero.id === 'megumi') {
+        this.shield = Math.min(200, this.shield + 15);
+        this.mana = Math.min(this.maxMana, this.mana + 12);
       }
 
       if (unit.type === 'HERO') {
@@ -2756,6 +3734,25 @@ export class FpsMobaEngine {
       maxAge: durationSec,
       onUpdate: (_dt, p) => {
         mat.opacity = (1 - p) * 0.92;
+      }
+    });
+  }
+
+  private spawnCursedBurst(
+    pos: THREE.Vector3,
+    variant: 'RED' | 'BLUE' | 'PURPLE' | 'FIRE' | 'SHADOW' | 'SKY',
+    radius = 1.8,
+    count = 72
+  ) {
+    const burst = createCursedExplosionParticles({ variant, radius, count });
+    burst.group.position.copy(pos);
+    this.scene.add(burst.group);
+    this.vfxList.push({
+      mesh: burst.group,
+      age: 0,
+      maxAge: variant === 'PURPLE' ? 1.15 : 0.85,
+      onUpdate: (dt, progress) => {
+        burst.update(dt, progress);
       }
     });
   }
@@ -2917,6 +3914,9 @@ export class FpsMobaEngine {
       this.updatePlayer(dt, elapsed);
       this.updateDomains(dt, elapsed);
       this.updateMobaUnits(dt, elapsed);
+      this.resolveUnitBodyBlocking();
+      this.physicsWorld?.nudgeBodiesAroundPoint(this.playerPos, this.playerVel, 0.9, dt);
+      this.physicsWorld?.step(dt);
     }
 
     this.updateAudio(dt);
@@ -2934,6 +3934,133 @@ export class FpsMobaEngine {
       this.emitHud();
     }
   };
+
+  /**
+   * Character-vs-character horizontal body blocking (circle separation):
+   * Prevents heroes, minions, Divine Dogs, and Mahoraga from walking through each other or the player,
+   * while allowing jumps cleanly over shorter targets and ignoring intangible shadow/aerial summons.
+   */
+  private resolveUnitBodyBlocking() {
+    const isSolidBody = (u: MobaUnit) =>
+      u.alive &&
+      u.type !== 'TOWER' &&
+      u.type !== 'CORE' &&
+      !(u instanceof ToadShikigami) &&
+      !(u instanceof NueShikigami) &&
+      !(u instanceof NueCarryShikigami) &&
+      !(u instanceof RabbitEscapeShikigami);
+
+    const solidUnits = this.units.filter(isSolidBody);
+
+    // 1. Unit-vs-Unit separation
+    for (let i = 0; i < solidUnits.length; i++) {
+      const a = solidUnits[i];
+      for (let j = i + 1; j < solidUnits.length; j++) {
+        const b = solidUnits[j];
+        if (Math.abs(a.group.position.y - b.group.position.y) > Math.max(a.height, b.height) * 0.85) {
+          continue;
+        }
+        const dx = b.group.position.x - a.group.position.x;
+        const dz = b.group.position.z - a.group.position.z;
+        const dist = Math.hypot(dx, dz);
+        const minDist = (a.radius + b.radius) * 0.85;
+        if (dist < minDist && dist > 0.0001) {
+          const overlap = (minDist - dist) * 0.5;
+          const nx = dx / dist;
+          const nz = dz / dist;
+
+          const aMovable = a.moveSpeed > 0 && !(a.isDummy && !a.isRoamer && !a.npcAi);
+          const bMovable = b.moveSpeed > 0 && !(b.isDummy && !b.isRoamer && !b.npcAi);
+
+          if (aMovable) {
+            const pushA = bMovable ? overlap : overlap * 2;
+            const resA = this.mapBuilder.resolveHorizontalCollision(
+              a.group.position.x - nx * pushA,
+              a.group.position.z - nz * pushA,
+              a.radius,
+              a.group.position.y
+            );
+            a.group.position.x = resA.x;
+            a.group.position.z = resA.z;
+            this.clampUnitToDomainBarrier(a);
+          }
+          if (bMovable) {
+            const pushB = aMovable ? overlap : overlap * 2;
+            const resB = this.mapBuilder.resolveHorizontalCollision(
+              b.group.position.x + nx * pushB,
+              b.group.position.z + nz * pushB,
+              b.radius,
+              b.group.position.y
+            );
+            b.group.position.x = resB.x;
+            b.group.position.z = resB.z;
+            this.clampUnitToDomainBarrier(b);
+          }
+        }
+      }
+    }
+
+    // 2. Player-vs-Unit body blocking (skipped while submerged in Shadow Step, casting Teleport, or flying on Nue)
+    if (
+      this.playerRespawnTimer > 0 ||
+      this.shadowStepTimer > 0 ||
+      this.teleportPhase === 'CASTING' ||
+      this.nueCarryTimer > 0
+    ) {
+      return;
+    }
+
+    const playerRadius = 0.65;
+    for (const u of solidUnits) {
+      // Allow jumping cleanly over enemies
+      if (this.playerPos.y > u.group.position.y + u.height * 0.85 || this.playerPos.y + 1.7 < u.group.position.y) {
+        continue;
+      }
+      const dx = this.playerPos.x - u.group.position.x;
+      const dz = this.playerPos.z - u.group.position.z;
+      const dist = Math.hypot(dx, dz);
+      const minDist = (playerRadius + u.radius) * 0.88;
+      if (dist < minDist && dist > 0.0001) {
+        const overlap = minDist - dist;
+        const nx = dx / dist;
+        const nz = dz / dist;
+        const uMovable = u.moveSpeed > 0 && !(u.isDummy && !u.isRoamer && !u.npcAi);
+        const playerPush = uMovable ? overlap * 0.62 : overlap;
+        const unitPush = uMovable ? overlap * 0.38 : 0;
+
+        const resP = this.mapBuilder.resolveHorizontalCollision(
+          this.playerPos.x + nx * playerPush,
+          this.playerPos.z + nz * playerPush,
+          playerRadius,
+          this.playerPos.y
+        );
+        this.playerPos.x = resP.x;
+        this.playerPos.z = resP.z;
+
+        for (const dom of this.activeDomains) {
+          const c = dom.clampPosition(
+            { x: this.playerPos.x, z: this.playerPos.z, y: this.playerPos.y },
+            playerRadius,
+            dom.isPlayerTrapped
+          );
+          this.playerPos.x = c.x;
+          this.playerPos.z = c.z;
+        }
+
+        if (unitPush > 0) {
+          const resU = this.mapBuilder.resolveHorizontalCollision(
+            u.group.position.x - nx * unitPush,
+            u.group.position.z - nz * unitPush,
+            u.radius,
+            u.group.position.y
+          );
+          u.group.position.x = resU.x;
+          u.group.position.z = resU.z;
+          this.clampUnitToDomainBarrier(u);
+        }
+      }
+    }
+  }
 
   // ─────────────────────────────────────────────────────────────
   //  Web Audio & 3D Spatial Audio System
@@ -2992,9 +4119,19 @@ export class FpsMobaEngine {
     parent.add(sound);
 
     const onPlay = (buf: AudioBuffer) => {
-      if (this.destroyed) return;
-      sound.setBuffer(buf);
-      sound.play();
+      if (this.destroyed || sound.userData.cancelled) return;
+      const start = () => {
+        if (this.destroyed || sound.userData.cancelled || sound.isPlaying) return;
+        try {
+          sound.setBuffer(buf);
+          sound.play();
+        } catch {}
+      };
+      if (this.audioListener?.context?.state === 'suspended') {
+        this.audioListener.context.resume().then(start).catch(() => {});
+      } else {
+        start();
+      }
     };
 
     const cached = this.audioBuffers.get(url);
@@ -3036,9 +4173,19 @@ export class FpsMobaEngine {
     sound.setLoop(opts.loop ?? false);
 
     const onPlay = (buf: AudioBuffer) => {
-      if (this.destroyed) return;
-      sound.setBuffer(buf);
-      sound.play();
+      if (this.destroyed || sound.userData.cancelled) return;
+      const start = () => {
+        if (this.destroyed || sound.userData.cancelled || sound.isPlaying) return;
+        try {
+          sound.setBuffer(buf);
+          sound.play();
+        } catch {}
+      };
+      if (this.audioListener?.context?.state === 'suspended') {
+        this.audioListener.context.resume().then(start).catch(() => {});
+      } else {
+        start();
+      }
     };
 
     const cached = this.audioBuffers.get(url);
@@ -3051,37 +4198,40 @@ export class FpsMobaEngine {
     return sound;
   }
 
+  private stopSoundSafe(sound: THREE.Audio | THREE.PositionalAudio | null | undefined) {
+    if (!sound) return;
+    sound.userData.cancelled = true;
+    try {
+      if (sound.isPlaying) sound.stop();
+      sound.disconnect();
+    } catch {}
+  }
+
   private stopAllAudio() {
     if (this.playerShieldAudio) {
-      try {
-        this.playerShieldAudio.stop();
-        this.playerShieldAudio.disconnect();
-      } catch {}
+      this.stopSoundSafe(this.playerShieldAudio);
       this.playerShieldAudio = null;
     }
     if (this.playerDomainAudio) {
-      try {
-        this.playerDomainAudio.stop();
-        this.playerDomainAudio.disconnect();
-      } catch {}
+      this.stopSoundSafe(this.playerDomainAudio);
       this.playerDomainAudio = null;
+    }
+    if (this.playerVoiceAudio) {
+      this.stopSoundSafe(this.playerVoiceAudio);
+      this.playerVoiceAudio = null;
     }
     for (const u of this.units) {
       if (u.npcShieldAudio) {
+        this.stopSoundSafe(u.npcShieldAudio);
         try {
-          u.npcShieldAudio.stop();
           u.group.remove(u.npcShieldAudio);
-          u.npcShieldAudio.disconnect();
         } catch {}
         u.npcShieldAudio = undefined;
       }
     }
     for (const dom of this.activeDomains) {
       if (dom.audio) {
-        try {
-          dom.audio.stop();
-          dom.audio.disconnect();
-        } catch {}
+        this.stopSoundSafe(dom.audio);
         dom.audio = undefined;
       }
     }
@@ -3106,10 +4256,7 @@ export class FpsMobaEngine {
         });
       }
     } else if (this.playerShieldAudio) {
-      try {
-        this.playerShieldAudio.stop();
-        this.playerShieldAudio.disconnect();
-      } catch {}
+      this.stopSoundSafe(this.playerShieldAudio);
       this.playerShieldAudio = null;
     }
 
@@ -3117,10 +4264,7 @@ export class FpsMobaEngine {
     if (this.playerDomainAudio && this.playerDomainAudio.isPlaying) {
       const pDom = this.activeDomain;
       if (!pDom || !pDom.isGojoDomain || this.winner || !this.pointerLocked) {
-        try {
-          this.playerDomainAudio.stop();
-          this.playerDomainAudio.disconnect();
-        } catch {}
+        this.stopSoundSafe(this.playerDomainAudio);
         this.playerDomainAudio = null;
       }
     }
@@ -3140,6 +4284,13 @@ export class FpsMobaEngine {
       }
     } else if (!this.isBarrierActive() && !this.isChargingPrimary && !this.isChargingPunch) {
       this.mana = Math.min(this.maxMana, this.mana + this.getCeRegenPerSec() * dt);
+    }
+
+    // Out-of-combat Health Regeneration (regenerate after 5 seconds of not sustaining damage)
+    this.playerOutOfCombatTimer += dt;
+    if (this.playerOutOfCombatTimer >= 5.0 && this.hp < this.maxHp && this.playerRespawnTimer <= 0) {
+      const regenRate = Math.max(25, this.maxHp * 0.08);
+      this.hp = Math.min(this.maxHp, this.hp + regenRate * dt);
     }
 
     // Brigitte Inspire Passive Healing over time
@@ -3214,8 +4365,18 @@ export class FpsMobaEngine {
     }
 
     (['SHIFT', 'E', 'Q'] as FpsAbilityKey[]).forEach((k) => {
-      if (this.cooldowns[k].remainingMs > 0) {
-        this.cooldowns[k].remainingMs = Math.max(0, this.cooldowns[k].remainingMs - dtMs);
+      const cd = this.cooldowns[k];
+      if (cd.maxCharges && cd.maxCharges > 1) {
+        const charges = cd.charges ?? cd.maxCharges;
+        if (charges < cd.maxCharges) {
+          cd.remainingMs = Math.max(0, cd.remainingMs - dtMs);
+          if (cd.remainingMs <= 0) {
+            cd.charges = charges + 1;
+            cd.remainingMs = cd.charges < cd.maxCharges ? cd.totalMs : 0;
+          }
+        }
+      } else if (cd.remainingMs > 0) {
+        cd.remainingMs = Math.max(0, cd.remainingMs - dtMs);
       }
     });
 
@@ -3238,9 +4399,22 @@ export class FpsMobaEngine {
         this.mana = this.maxMana;
         this.barrierHp = this.barrierMaxHp;
         this.playerPos.set(0, 0, 64);
+        this.playerOutOfCombatTimer = 5.0;
       }
       this.syncCameraToPlayer();
       return;
+    }
+
+    // Megumi Shadow Step duration & floor puddle tracking
+    if (this.shadowStepTimer > 0) {
+      this.shadowStepTimer -= dt;
+      if (this.shadowPuddleMesh) {
+        this.shadowPuddleMesh.position.set(this.playerPos.x, this.playerPos.y + 0.08, this.playerPos.z);
+        this.shadowPuddleMesh.rotation.y += dt * 2.5;
+      }
+      if (this.shadowStepTimer <= 0) {
+        this.exitShadowStep();
+      }
     }
 
     // Continuous fire / melee swing when holding Left Click
@@ -3250,7 +4424,9 @@ export class FpsMobaEngine {
       (this.hero.weapon.fireMode === 'AUTO' ||
         this.hero.weapon.fireMode === 'BURST' ||
         this.hero.weapon.fireMode === 'MELEE_CLEAVE' ||
-        this.hero.weapon.fireMode === 'HAND_CANNON')
+        this.hero.weapon.fireMode === 'HAND_CANNON' ||
+        this.hero.weapon.fireMode === 'EMBER_INSECTS' ||
+        this.hero.weapon.fireMode === 'HYBRID_SHADOW')
     ) {
       this.tryPrimaryFire();
     }
@@ -3265,15 +4441,17 @@ export class FpsMobaEngine {
 
     const isMoving = moveForward !== 0 || moveRight !== 0;
     const domainSpeedBonus = this.activeDomain ? 1.28 : 1.0;
+    const shadowStepSpeedBonus = this.shadowStepTimer > 0 ? 1.45 : 1.0;
     const shieldPenalty = this.isBarrierActive() || this.isChargingPunch ? 0.72 : 1.0;
-    const teleportSlow = this.teleportPhase !== 'NONE' ? 0 : 1.0;
+    const teleportSlow = this.teleportPhase !== 'NONE' || this.meteorAiming ? 0 : 1.0;
     let npcDomainSlow = 1.0;
     for (const dom of this.activeDomains) {
       if (dom.casterId !== 'player' && dom.isPlayerTrapped) {
-        npcDomainSlow = Math.min(npcDomainSlow, 0.1);
+        npcDomainSlow = Math.min(npcDomainSlow, 0.45);
       }
     }
-    const speed = this.hero.moveSpeed * domainSpeedBonus * shieldPenalty * teleportSlow * npcDomainSlow;
+    const speed =
+      this.hero.moveSpeed * domainSpeedBonus * shadowStepSpeedBonus * shieldPenalty * teleportSlow * npcDomainSlow;
 
     const forwardVec = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     const rightVec = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
@@ -3287,17 +4465,116 @@ export class FpsMobaEngine {
     const targetVz = moveDir.z * speed;
     this.playerVel.x = THREE.MathUtils.lerp(this.playerVel.x, targetVx, dt * 12);
     this.playerVel.z = THREE.MathUtils.lerp(this.playerVel.z, targetVz, dt * 12);
-    if (this.teleportPhase !== 'NONE') {
-      // Movement is fully locked while choosing / casting Limitless Teleport
+    if (this.flameDashTimer > 0) {
+      this.flameDashTimer = Math.max(0, this.flameDashTimer - dt);
+      const dashSpeed = 54.0;
+      this.playerVel.x = this.flameDashDir.x * dashSpeed;
+      this.playerVel.z = this.flameDashDir.z * dashSpeed;
+    }
+    let isSkyPulling = false;
+    if (this.skyPullTimer > 0) {
+      this.skyPullTimer = Math.max(0, this.skyPullTimer - dt);
+      isSkyPulling = true;
+      const pullSpeed = 42.0;
+      this.playerVel.set(
+        this.skyPullDir.x * pullSpeed,
+        this.skyPullDir.y * pullSpeed,
+        this.skyPullDir.z * pullSpeed
+      );
+      this.grounded = false;
+    }
+    if (this.skyDeflectCounterCooldown > 0) {
+      this.skyDeflectCounterCooldown = Math.max(0, this.skyDeflectCounterCooldown - dt);
+    }
+    if (this.teleportPhase !== 'NONE' || this.meteorAiming) {
+      // Movement is locked while aiming Limitless Teleport or Maximum: Meteor
       this.playerVel.x = 0;
       this.playerVel.z = 0;
     }
 
-    if (this.keys.has('Space') && this.grounded && this.teleportPhase === 'NONE') {
-      this.playerVel.y = 11.2;
-      this.grounded = false;
+    if (this.nueCarryDelaySec > 0) {
+      this.nueCarryDelaySec = Math.max(0, this.nueCarryDelaySec - dt);
     }
-    this.playerVel.y -= 28.0 * dt;
+
+    if (
+      this.nueCarryAvailable &&
+      this.nueCarryDelaySec <= 0 &&
+      !this.grounded &&
+      this.keys.has('Space') &&
+      this.teleportPhase === 'NONE' &&
+      !this.meteorAiming &&
+      this.shadowStepTimer <= 0
+    ) {
+      this.startNueCarry();
+    }
+
+    let isNueCarrying = false;
+    if (this.nueCarryTimer > 0) {
+      if (!this.keys.has('Space') || this.shadowStepTimer > 0 || this.playerRespawnTimer > 0 || this.winner) {
+        this.endNueCarry();
+      } else {
+        isNueCarrying = true;
+        this.nueCarryTimer = Math.max(0, this.nueCarryTimer - dt);
+        const lookForward = new THREE.Vector3(
+          -Math.sin(this.yaw) * Math.cos(this.pitch),
+          Math.sin(this.pitch),
+          -Math.cos(this.yaw) * Math.cos(this.pitch)
+        ).normalize();
+        const carryDir = new THREE.Vector3();
+        if (moveForward !== 0 || moveRight !== 0) {
+          carryDir.addScaledVector(lookForward, moveForward).addScaledVector(rightVec, moveRight);
+          if (carryDir.lengthSq() > 0.001) carryDir.normalize();
+          else carryDir.copy(lookForward);
+        } else {
+          carryDir.copy(lookForward);
+        }
+        const carrySpeed = 20.5;
+        this.playerVel.set(carryDir.x * carrySpeed, carryDir.y * carrySpeed, carryDir.z * carrySpeed);
+        this.grounded = false;
+        if (this.nueCarryTimer <= 0) {
+          this.endNueCarry();
+        }
+      }
+    }
+
+    this.isSkyHovering = false;
+    if (!isNueCarrying && !isSkyPulling) {
+      if (this.keys.has('Space') && this.grounded && this.teleportPhase === 'NONE' && !this.meteorAiming) {
+        this.playerVel.y = this.hero.id === 'uro' ? 13.0 : 11.2;
+        this.grounded = false;
+      }
+
+      const uroInDomain = this.hero.id === 'uro' && Boolean(this.activeDomain?.isUroDomain);
+      if (
+        this.hero.id === 'uro' &&
+        !this.grounded &&
+        this.keys.has('Space') &&
+        this.teleportPhase === 'NONE' &&
+        !this.meteorAiming &&
+        this.playerVel.y <= 1.8
+      ) {
+        // Passive: Surface of the Sky — hold SPACE midair to glide & hover across the sky
+        this.isSkyHovering = true;
+        if (uroInDomain) {
+          const lift = Math.sin(this.pitch) > 0.22 ? 6.5 : 0.0;
+          this.playerVel.y = THREE.MathUtils.lerp(this.playerVel.y, lift, Math.min(1, dt * 10));
+        } else {
+          this.playerVel.y = Math.max(-1.6, this.playerVel.y - 6.0 * dt);
+        }
+      } else if (this.rabbitLaunchBoostTimer > 0) {
+        this.rabbitLaunchBoostTimer = Math.max(0, this.rabbitLaunchBoostTimer - dt);
+        // Lighter gravity during Rabbit Escape upward momentum so Megumi soars high with hang-time
+        this.playerVel.y -= 13.5 * dt;
+      } else if (this.skyPullBoostTimer > 0) {
+        this.skyPullBoostTimer = Math.max(0, this.skyPullBoostTimer - dt);
+        // Buoyant hang-time after Uro's Sky Pull
+        this.playerVel.y -= 12.5 * dt;
+      } else if (uroInDomain) {
+        this.playerVel.y -= 15.0 * dt;
+      } else {
+        this.playerVel.y -= 28.0 * dt;
+      }
+    }
 
     const nextX = this.playerPos.x + this.playerVel.x * dt;
     const nextZ = this.playerPos.z + this.playerVel.z * dt;
@@ -3308,7 +4585,7 @@ export class FpsMobaEngine {
     // Enforce Domain barrier boundary for player: trapped players cannot leave, outside players cannot enter
     for (const dom of this.activeDomains) {
       const c = dom.clampPosition(
-        { x: this.playerPos.x, z: this.playerPos.z },
+        { x: this.playerPos.x, z: this.playerPos.z, y: this.playerPos.y },
         0.65,
         dom.isPlayerTrapped
       );
@@ -3316,12 +4593,18 @@ export class FpsMobaEngine {
       this.playerPos.z = c.z;
     }
 
-    this.playerPos.y += this.playerVel.y * dt;
+    this.playerPos.y = Math.min(48, this.playerPos.y + this.playerVel.y * dt);
     const floorY = this.mapBuilder.getFloorHeight(this.playerPos.x, this.playerPos.z, this.playerPos.y);
     if (this.playerPos.y <= floorY) {
       this.playerPos.y = floorY;
       this.playerVel.y = 0;
       this.grounded = true;
+      this.rabbitLaunchBoostTimer = 0;
+      this.skyPullBoostTimer = 0;
+      this.isSkyHovering = false;
+      if (this.nueCarryTimer <= 0) {
+        this.nueCarryAvailable = false;
+      }
     }
 
     if (this.playerPos.z > 62 && this.hp < this.maxHp) {
@@ -3345,7 +4628,8 @@ export class FpsMobaEngine {
   }
 
   private syncCameraToPlayer() {
-    const eye = new THREE.Vector3(this.playerPos.x, this.playerPos.y + 1.72, this.playerPos.z);
+    const eyeHeight = this.shadowStepTimer > 0 ? 0.62 : 1.72;
+    const eye = new THREE.Vector3(this.playerPos.x, this.playerPos.y + eyeHeight, this.playerPos.z);
     if (this.teleportCamBlend > 0.001) {
       // Over-the-shoulder third-person camera used while aiming / casting Limitless Teleport
       const f = new THREE.Vector3(
@@ -3376,9 +4660,15 @@ export class FpsMobaEngine {
       // Check if caster is still alive
       if (dom.casterId === 'player') {
         if (this.playerRespawnTimer > 0) {
-          if (dom.isGojoDomain && this.playerDomainAudio) {
-            try { this.playerDomainAudio.stop(); this.playerDomainAudio.disconnect(); } catch {}
-            this.playerDomainAudio = null;
+          if (dom.isGojoDomain) {
+            if (this.playerDomainAudio) {
+              try { this.playerDomainAudio.stop(); this.playerDomainAudio.disconnect(); } catch {}
+              this.playerDomainAudio = null;
+            }
+            if (this.playerVoiceAudio && !dom.purpleTriggered) {
+              try { this.playerVoiceAudio.stop(); this.playerVoiceAudio.disconnect(); } catch {}
+              this.playerVoiceAudio = null;
+            }
           }
           dom.cleanup(this.scene);
           this.activeDomains.splice(i, 1);
@@ -3408,16 +4698,20 @@ export class FpsMobaEngine {
         if (dom.hp <= 0) {
           this.shatterDomain(dom);
         } else {
-          if (dom.isGojoDomain && dom.casterId === 'player' && this.playerDomainAudio) {
-            try { this.playerDomainAudio.stop(); this.playerDomainAudio.disconnect(); } catch {}
-            this.playerDomainAudio = null;
+          if (dom.isGojoDomain && dom.casterId === 'player') {
+            if (this.playerDomainAudio) {
+              try { this.playerDomainAudio.stop(); this.playerDomainAudio.disconnect(); } catch {}
+              this.playerDomainAudio = null;
+            }
+            if (this.playerVoiceAudio && !dom.purpleTriggered) {
+              try { this.playerVoiceAudio.stop(); this.playerVoiceAudio.disconnect(); } catch {}
+              this.playerVoiceAudio = null;
+            }
           }
+          this.onDomainEnded(dom);
           dom.cleanup(this.scene);
           const idx = this.activeDomains.indexOf(dom);
           if (idx !== -1) this.activeDomains.splice(idx, 1);
-          if (dom.casterId === 'player' && dom.isGojoDomain) {
-            this.cooldowns.Q.remainingMs = this.hero.abilities.Q.cooldownMs;
-          }
         }
         continue;
       }
@@ -3425,22 +4719,33 @@ export class FpsMobaEngine {
       if (res.shouldTickDamage) {
         // Trapped player takes tick damage if inside an enemy domain
         if (dom.isPlayerTrapped && dom.isEnemy('blue') && this.playerRespawnTimer <= 0) {
-          this.spawnPillarEffect(this.playerPos, 0.9, 10, dom.color, 0.45);
-          this.applyDamageToPlayer(10, `${dom.casterName} (${dom.name})`, dom.casterTeam);
+          if (dom.isJogoDomain) {
+            this.spawnCursedBurst(this.playerPos.clone().add(new THREE.Vector3(0, 1.0, 0)), 'FIRE', 1.2, 22);
+            this.applyDamageToPlayer(20, `${dom.casterName} (Burn)`, dom.casterTeam);
+          } else {
+            this.spawnPillarEffect(this.playerPos, 0.9, 10, dom.color, 0.45);
+            this.applyDamageToPlayer(10, `${dom.casterName} (${dom.name})`, dom.casterTeam);
+          }
         }
 
-        // Trapped enemy units receive domain tick damage & stun
+        // Trapped enemy units receive domain tick damage (Jogo burns -20 HP/sec; Megumi sinks enemies in shadow)
         for (const u of this.units) {
           if (!u.alive || !dom.isEnemy(u.team) || !dom.isTrapped(u.id)) continue;
-          this.spawnPillarEffect(u.group.position, 0.9, 10, dom.color, 0.45);
-          const tickDmg = dom.isGojoDomain ? 18 : 12;
-          this.damageUnit(
-            u,
-            tickDmg,
-            false,
-            dom.name,
-            u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.8, 0))
-          );
+          const hitPos = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.8, 0));
+          if (dom.isJogoDomain) {
+            this.spawnCursedBurst(hitPos, 'FIRE', 1.15, 22);
+            this.damageUnit(u, 20, false, dom.name, hitPos, 'BURN');
+          } else if (dom.isMegumiDomain) {
+            this.spawnCursedBurst(u.group.position.clone().add(new THREE.Vector3(0, 0.25, 0)), 'SHADOW', 1.2, 20);
+            this.damageUnit(u, 14, false, dom.name, hitPos, 'SHADOW SINK');
+          } else if (dom.isUroDomain) {
+            this.spawnCursedBurst(hitPos, 'SKY', 1.25, 22);
+            this.damageUnit(u, 22, false, dom.name, hitPos, 'SKY SHEAR');
+          } else {
+            this.spawnPillarEffect(u.group.position, 0.9, 10, dom.color, 0.45);
+            const tickDmg = dom.isGojoDomain ? 18 : 12;
+            this.damageUnit(u, tickDmg, false, dom.name, hitPos);
+          }
         }
       }
     }
@@ -3466,7 +4771,7 @@ export class FpsMobaEngine {
               u.npcAi.cd = { red: 2, blue: 4, shift: 1, infinity: 3, domain: 2.0 };
             }
           }
-        } else if (u.type === 'MINION') {
+        } else if (u.type === 'MINION' || u.type === 'SHIKIGAMI') {
           this.units.splice(i, 1);
         }
         continue;
@@ -3484,6 +4789,40 @@ export class FpsMobaEngine {
         u.headMesh.rotation.x = elapsed * 1.1;
       }
 
+      // Polymorphic Shikigami tick (lifetime decay, Toad pull, Nue dive, Mahoraga Dharma Wheel & rogue transition)
+      if (u instanceof ShikigamiEntity) {
+        const expired = u.tickShikigami(dt, elapsed, this.getShikigamiContext());
+        if (expired) {
+          this.units.splice(i, 1);
+          continue;
+        }
+        if (u instanceof ToadShikigami || u instanceof NueShikigami || u instanceof NueCarryShikigami) {
+          continue;
+        }
+      }
+
+      // Gravity for airborne units (e.g. lifted skyward by Lapse Blue) once active pull ends
+      if (u.pullActiveTimer && u.pullActiveTimer > 0) {
+        u.pullActiveTimer = Math.max(0, u.pullActiveTimer - dt);
+      } else if (u.type !== 'TOWER' && u.type !== 'CORE') {
+        const inMegumiShadowSink = this.activeDomains.some(
+          (d) => d.isMegumiDomain && d.isEnemy(u.team) && d.isTrapped(u.id)
+        );
+        const sinkOffset = inMegumiShadowSink ? -0.52 : 0;
+        const floorY =
+          this.mapBuilder.getFloorHeight(u.group.position.x, u.group.position.z, u.group.position.y) + sinkOffset;
+        if (u.group.position.y > floorY) {
+          u.verticalVel = (u.verticalVel ?? 0) - 28.0 * dt;
+          u.group.position.y = Math.max(floorY, u.group.position.y + u.verticalVel * dt);
+          if (u.group.position.y <= floorY) {
+            u.verticalVel = 0;
+          }
+        } else {
+          u.group.position.y = floorY;
+          u.verticalVel = 0;
+        }
+      }
+
       // Stunned units (from Earthshatter / Shield Bash / Wall Slam) cannot move or attack
       if (u.stunTimer && u.stunTimer > 0) {
         u.stunTimer = Math.max(0, u.stunTimer - dt);
@@ -3497,17 +4836,18 @@ export class FpsMobaEngine {
         u.bodyMesh.rotation.z = 0;
       }
 
-      // Hero Training Dummies stay at their sparring stations (or roam the map if isRoamer) & regen out of combat
+      // Out-of-combat Health Regeneration after 5 seconds of not sustaining damage
+      if (u.outOfCombatTimer && u.outOfCombatTimer > 0) {
+        u.outOfCombatTimer = Math.max(0, u.outOfCombatTimer - dt);
+      } else if (u.alive && u.hp < u.maxHp && (u.type === 'HERO' || u.isDummy)) {
+        const regenRate = u.isDummy && !u.isRoamer ? 95 : Math.max(25, u.maxHp * 0.08);
+        u.hp = Math.min(u.maxHp, u.hp + regenRate * dt);
+      }
+
+      // Hero Training Dummies stay at their sparring stations (or roam the map if isRoamer)
       if (u.isDummy) {
-        if (u.outOfCombatTimer && u.outOfCombatTimer > 0) {
-          u.outOfCombatTimer = Math.max(0, u.outOfCombatTimer - dt);
-        } else {
-          if (!u.isRoamer && u.spawnPos && u.group.position.distanceTo(u.spawnPos) > 0.05) {
-            u.group.position.lerp(u.spawnPos, Math.min(1, dt * 4.5));
-          }
-          if (u.hp < u.maxHp) {
-            u.hp = Math.min(u.maxHp, u.hp + 95 * dt);
-          }
+        if (!u.isRoamer && u.spawnPos && u.group.position.distanceTo(u.spawnPos) > 0.05) {
+          u.group.position.lerp(u.spawnPos, Math.min(1, dt * 4.5));
         }
 
         // AI-driven combatant (Gojo): full move kit, CE pool, cooldowns, domain & purple
@@ -3573,11 +4913,14 @@ export class FpsMobaEngine {
               u.group.position.x = resolved.x;
               u.group.position.z = resolved.z;
               this.clampUnitToDomainBarrier(u);
-              u.group.position.y = this.mapBuilder.getFloorHeight(
+              const roamerFloorY = this.mapBuilder.getFloorHeight(
                 u.group.position.x,
                 u.group.position.z,
                 u.group.position.y
               );
+              if (u.group.position.y < roamerFloorY) {
+                u.group.position.y = roamerFloorY;
+              }
               this.rotateUnitToward(u, dx, dz, dt);
 
               const moved = Math.hypot(u.group.position.x - prevX, u.group.position.z - prevZ);
@@ -3599,23 +4942,34 @@ export class FpsMobaEngine {
 
       let bestTargetUnit: MobaUnit | null = null;
       let bestDist = Infinity;
-
-      for (const other of this.units) {
-        if (!other.alive || other.team === u.team || other.isDummy) continue;
-        const d = u.group.position.distanceTo(other.group.position);
-        if (d < bestDist) {
-          bestDist = d;
-          bestTargetUnit = other;
-        }
-      }
-
       let targetIsPlayer = false;
-      if (u.team === 'red' && this.playerRespawnTimer <= 0) {
-        const distToPlayer = u.group.position.distanceTo(this.playerPos);
-        if (distToPlayer < bestDist && distToPlayer <= Math.max(u.attackRange * 1.35, 28)) {
-          bestDist = distToPlayer;
-          targetIsPlayer = true;
-          bestTargetUnit = null;
+      const isShikigami = u instanceof ShikigamiEntity;
+
+      if (isShikigami) {
+        const chosen = u.selectTarget(this.getShikigamiContext());
+        if (chosen) {
+          bestTargetUnit = chosen.unit as MobaUnit | null;
+          targetIsPlayer = chosen.targetPlayer;
+          bestDist = chosen.distance;
+        }
+      } else {
+        for (const other of this.units) {
+          if (!other.alive || other.team === u.team || other.isDummy) continue;
+          const d = u.group.position.distanceTo(other.group.position);
+          if (d < bestDist) {
+            bestDist = d;
+            bestTargetUnit = other;
+          }
+        }
+
+        const playerDetectable = this.playerRespawnTimer <= 0 && this.shadowStepTimer <= 0;
+        if (u.team === 'red' && playerDetectable) {
+          const distToPlayer = u.group.position.distanceTo(this.playerPos);
+          if (distToPlayer < bestDist && distToPlayer <= Math.max(u.attackRange * 1.35, 28)) {
+            bestDist = distToPlayer;
+            targetIsPlayer = true;
+            bestTargetUnit = null;
+          }
         }
       }
 
@@ -3640,7 +4994,7 @@ export class FpsMobaEngine {
           const inDomainSlow = this.getDomainSlowMultiplier(u);
           u.group.position.addScaledVector(dir, u.moveSpeed * inDomainSlow * dt);
           this.clampUnitToDomainBarrier(u);
-          if (u.type === 'HERO') {
+          if (u.type === 'HERO' || isShikigami) {
             this.rotateUnitToward(u, dir.x, dir.z, dt);
           }
         }
@@ -3649,10 +5003,11 @@ export class FpsMobaEngine {
       }
 
       u.attackTimer -= dt;
-      if (u.attackTimer <= 0 && bestDist <= u.attackRange) {
+      const canUnitAttack = this.aiAttackingEnabled || isShikigami;
+      if (canUnitAttack && u.attackTimer <= 0 && bestDist <= u.attackRange) {
         u.attackTimer = u.attackCooldown;
         const origin = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.75, 0));
-        const beamCol = u.team === 'blue' ? '#38bdf8' : '#f43f5e';
+        const beamCol = isShikigami ? u.beamColor : u.team === 'blue' ? '#38bdf8' : '#f43f5e';
 
         if (targetIsPlayer) {
           const dom = this.activeDomain;
@@ -3670,8 +5025,7 @@ export class FpsMobaEngine {
             this.spawnImpactRing(shellHit, '#f43f5e', 1.8);
             dom.hp = Math.max(0, dom.hp - u.attackDamage);
             if (dom.hp <= 0) {
-              this.spawnImpactRing(dom.center.clone().add(new THREE.Vector3(0, 1.5, 0)), dom.color, dom.radius);
-              this.endActiveDomain();
+              this.shatterDomain(dom, u.name);
             }
           } else {
             const playerChest = this.playerPos.clone().add(new THREE.Vector3(0, 1.2, 0));
@@ -3683,23 +5037,44 @@ export class FpsMobaEngine {
             .clone()
             .add(new THREE.Vector3(0, bestTargetUnit.height * 0.65, 0));
           this.spawnBeamTracer(origin, targetCenter, beamCol, 0.16, 0.05);
-          bestTargetUnit.hp = Math.max(0, bestTargetUnit.hp - u.attackDamage);
 
-          if (bestTargetUnit.hp <= 0) {
-            bestTargetUnit.alive = false;
-            if (bestTargetUnit.type === 'HERO') {
-              bestTargetUnit.respawnTimer = 8.0;
-              bestTargetUnit.group.visible = false;
-            } else {
-              this.scene.remove(bestTargetUnit.group);
+          if (isShikigami && u.isAlliedToSummoner && bestTargetUnit.team === 'red') {
+            this.damageUnit(
+              bestTargetUnit,
+              u.attackDamage,
+              u instanceof MahoragaShikigami,
+              u.name,
+              targetCenter
+            );
+            this.spawnCursedBurst(targetCenter, u.attackBurstVariant, 0.9, 18);
+          } else {
+            let dealt = u.attackDamage;
+            if (bestTargetUnit instanceof ShikigamiEntity) {
+              dealt = bestTargetUnit.modifyIncomingDamage(
+                dealt,
+                u.name,
+                targetCenter,
+                this.getShikigamiContext()
+              ).finalDamage;
             }
-            this.addKillFeed(u.name, u.team, bestTargetUnit.name, bestTargetUnit.team, 'Cursed Volley');
-            if (bestTargetUnit.id === 'blue_core') {
-              this.winner = 'red';
-              document.exitPointerLock?.();
-            } else if (bestTargetUnit.id === 'red_core') {
-              this.winner = 'blue';
-              document.exitPointerLock?.();
+            bestTargetUnit.hp = Math.max(0, bestTargetUnit.hp - dealt);
+
+            if (bestTargetUnit.hp <= 0) {
+              bestTargetUnit.alive = false;
+              if (bestTargetUnit.type === 'HERO') {
+                bestTargetUnit.respawnTimer = 8.0;
+                bestTargetUnit.group.visible = false;
+              } else {
+                this.scene.remove(bestTargetUnit.group);
+              }
+              this.addKillFeed(u.name, u.team, bestTargetUnit.name, bestTargetUnit.team, 'Cursed Volley');
+              if (bestTargetUnit.id === 'blue_core') {
+                this.winner = 'red';
+                document.exitPointerLock?.();
+              } else if (bestTargetUnit.id === 'red_core') {
+                this.winner = 'blue';
+                document.exitPointerLock?.();
+              }
             }
           }
         }
@@ -3779,7 +5154,7 @@ export class FpsMobaEngine {
       u.npcShieldMat.uniforms.uPoolRatio.value = ai.ce / ai.maxCe;
     }
 
-    const playerAlive = this.playerRespawnTimer <= 0 && !this.winner;
+    const playerAlive = this.playerRespawnTimer <= 0 && !this.winner && this.shadowStepTimer <= 0;
     const toPlayer = new THREE.Vector3(this.playerPos.x - u.group.position.x, 0, this.playerPos.z - u.group.position.z);
     const d = playerAlive ? toPlayer.length() : Infinity;
     const casting = Boolean(u.npcCast);
@@ -3863,11 +5238,14 @@ export class FpsMobaEngine {
       }
     }
     this.clampUnitToDomainBarrier(u);
-    u.group.position.y = this.mapBuilder.getFloorHeight(u.group.position.x, u.group.position.z, u.group.position.y);
+    const npcFloorY = this.mapBuilder.getFloorHeight(u.group.position.x, u.group.position.z, u.group.position.y);
+    if (u.group.position.y < npcFloorY) {
+      u.group.position.y = npcFloorY;
+    }
     u.animateRig?.(elapsed, movedNow && spd > 0, false, casting || busy ? 'idle' : phase);
 
     // ── Decisions ──
-    if (busy || ai.burnout > 0 || ai.think > 0) return;
+    if (!this.aiAttackingEnabled || busy || ai.burnout > 0 || ai.think > 0) return;
     ai.think = 0.25 + Math.random() * 0.25;
 
     // Inside his own Domain: let the player feel the void, then finish with Hollow Purple
@@ -3951,8 +5329,8 @@ export class FpsMobaEngine {
     const hero = u.heroDef;
     if (!ai || !hero) return;
     const chargeSec = 0.5 + Math.random() * 1.0;
-    // Same cost model as the player: base launch + continuous charge drain + detonate press
-    this.npcSpendCe(u, 12 + BLUE_CHARGE_DRAIN_PER_SEC * chargeSec + 10);
+    // Same cost model as the player: base launch + continuous charge drain (attract is free)
+    this.npcSpendCe(u, 12 + BLUE_CHARGE_DRAIN_PER_SEC * chargeSec);
     ai.cd.blue = hero.secondaryFire.cooldownMs! / 1000 + chargeSec;
     ai.busy = chargeSec + 0.2;
     this.npcChargeOrb(u, 'BLUE', chargeSec, BLUE_MAX_CHARGE_MS, (ratio) => {
@@ -4032,7 +5410,7 @@ export class FpsMobaEngine {
     if (!ai) return;
     this.npcSpendCe(u, 35);
     dom.purpleTriggered = true;
-    ai.busy = 1.0;
+    ai.busy = 5.0;
     const origin = u.group.position.clone().add(new THREE.Vector3(0, 1.35, 0));
     const dir = this.npcAimPoint(u).sub(origin).normalize();
     this.launchNpcGojoHollowPurple(u, origin, dir, true);
@@ -4042,12 +5420,19 @@ export class FpsMobaEngine {
     const q = u.heroDef?.abilities.Q;
     if (!q) return;
     this.endNpcDomain(u.id);
+
+    // Whenever a domain is expanded, their cursed energy bar gets filled up
+    if (u.npcAi) {
+      u.npcAi.ce = u.npcAi.maxCe;
+      u.npcAi.burnout = 0;
+    }
+
     const dom = new DomainExpansion({
       name: q.name,
       casterId: u.id,
       casterName: u.name,
       casterTeam: u.team,
-      center: u.group.position.clone(),
+      center: new THREE.Vector3(u.group.position.x, 0, u.group.position.z),
       radius: q.radius,
       durationMs: q.durationMs,
       color: q.color,
@@ -4064,6 +5449,16 @@ export class FpsMobaEngine {
     this.spawnImpactRing(dom.center.clone().add(new THREE.Vector3(0, 0.2, 0)), '#a855f7', q.radius);
 
     if (u.heroDef?.id === 'gojo') {
+      this.playSpatialSound(
+        '/assets/sounds/gojo/de_voice.mp3',
+        u.group,
+        {
+          volume: 1.0,
+          refDistance: 14,
+          maxDistance: 68,
+          rolloff: 1.1
+        }
+      );
       dom.audio = this.playSpatialSound(
         '/assets/sounds/gojo/unlimited_void.mp3',
         dom.domeMesh,
@@ -4082,6 +5477,7 @@ export class FpsMobaEngine {
       ? this.activeDomains.filter((d) => d.casterId === casterId)
       : this.activeDomains.filter((d) => d.casterId !== 'player');
     for (const dom of toRemove) {
+      this.onDomainEnded(dom);
       dom.cleanup(this.scene);
       const idx = this.activeDomains.indexOf(dom);
       if (idx !== -1) {
@@ -4179,104 +5575,356 @@ export class FpsMobaEngine {
     }
 
     u.npcAbilityTimer = (u.npcAbilityTimer ?? 3.0) - dt;
-    // Gojo is driven by updateNpcGojoAi (full kit); the timed rotation below is for other NPC heroes
-    if (hero.id === 'gojo') return;
     if (u.npcAbilityTimer > 0) return;
 
-    // Determine target point (aim toward player if within 36m and alive, otherwise toward another NPC or forward)
+    // Gojo uses his full combat AI when AI Attacking is enabled; when passive, he still showcases moves forward
+    if (hero.id === 'gojo') {
+      if (this.aiAttackingEnabled) return;
+      const yaw = u.group.rotation.y + (Math.random() - 0.5) * 0.7;
+      const showcaseDir = new THREE.Vector3(Math.sin(yaw), 0.04, Math.cos(yaw)).normalize();
+      u.group.rotation.y = Math.atan2(showcaseDir.x, showcaseDir.z);
+      const origin = u.group.position.clone().add(new THREE.Vector3(0, 1.35, 0));
+      const idx = u.npcAbilityIndex ?? 0;
+      u.npcAbilityIndex = (idx + 1) % 3;
+      if (idx === 0) {
+        u.npcAbilityTimer = 4.2;
+        this.launchNpcGojoRedOrb(u, origin.clone().addScaledVector(showcaseDir, 0.9), showcaseDir, 0.65);
+      } else if (idx === 1) {
+        u.npcAbilityTimer = 4.6;
+        u.npcShieldTimer = 2.0;
+        this.spawnImpactRing(origin, '#38bdf8', 3.2);
+      } else {
+        u.npcAbilityTimer = 5.0;
+        const orbDir = showcaseDir.clone().add(new THREE.Vector3(0, 0.25, 0)).normalize();
+        const blue = new LapseBlueProjectile({
+          startPos: origin.clone().addScaledVector(orbDir, 1.0),
+          forward: orbDir,
+          pullRadius: 6.5,
+          damage: 0,
+          durationMs: 2800,
+          abilityName: 'Lapse Blue',
+          color: '#0284c7',
+          team: u.team,
+          casterId: u.id,
+          casterName: u.name,
+          caster: u,
+          autoTriggerSec: 0.9,
+          pullIndicator: this.createRadiusIndicator('#0284c7'),
+          placeIndicator: (ind, x, z, r) => this.placeIndicator(ind, x, z, r),
+          onCooldownStart: () => {},
+          onClearActiveRef: () => {}
+        });
+        this.scene.add(blue.mesh);
+        this.projectiles.push(blue);
+      }
+      return;
+    }
+
+    // Showcase direction: cast along their current facing/roaming direction (not aimed straight at the player)
     const origin = u.group.position.clone().add(new THREE.Vector3(0, 1.35, 0));
+    const showcaseYaw = u.group.rotation.y + (Math.random() - 0.5) * 0.9;
+    const flatDir = new THREE.Vector3(Math.sin(showcaseYaw), 0, Math.cos(showcaseYaw)).normalize();
+    u.group.rotation.y = Math.atan2(flatDir.x, flatDir.z);
+    const aimDir = flatDir.clone();
+
+    const stepIndex = u.npcAbilityIndex ?? 0;
+    u.npcAbilityIndex = (stepIndex + 1) % 4;
+
+    // ── 1. JOGO SHOWCASE: Ember Insects, Flame Dash, Mini Volcano, Maximum: Meteor ──
+    if (hero.id === 'jogo') {
+      if (stepIndex === 0) {
+        u.npcAbilityTimer = 3.2;
+        const insect = new EmberInsectProjectile({
+          startPos: origin.clone().addScaledVector(aimDir, 1.0),
+          forward: aimDir,
+          damage: this.aiAttackingEnabled ? 22 : 0,
+          team: u.team,
+          casterId: u.id,
+          casterName: u.name,
+          caster: u
+        });
+        this.scene.add(insect.mesh);
+        this.projectiles.push(insect);
+        this.spawnImpactRing(origin, '#f97316', 1.2);
+      } else if (stepIndex === 1) {
+        u.npcAbilityTimer = 3.6;
+        const startPos = u.group.position.clone().add(new THREE.Vector3(0, 0.9, 0));
+        const dashDist = 10.0;
+        for (let s = 1; s <= 6; s++) {
+          const resolved = this.mapBuilder.resolveHorizontalCollision(
+            u.group.position.x + flatDir.x * (dashDist / 6),
+            u.group.position.z + flatDir.z * (dashDist / 6),
+            u.radius,
+            u.group.position.y
+          );
+          u.group.position.x = resolved.x;
+          u.group.position.z = resolved.z;
+          this.clampUnitToDomainBarrier(u);
+        }
+        this.spawnImpactRing(startPos, '#f97316', 2.4);
+        this.spawnCursedBurst(startPos, 'FIRE', 1.4, 34);
+      } else if (stepIndex === 2) {
+        u.npcAbilityTimer = 4.5;
+        const seedDir = flatDir.clone().add(new THREE.Vector3(0, 0.14, 0)).normalize();
+        const seed = new VolcanoSeedProjectile({
+          startPos: origin.clone().addScaledVector(seedDir, 0.9),
+          forward: seedDir,
+          damage: this.aiAttackingEnabled ? 14 : 0,
+          detectRadius: 14,
+          volcanoDurationMs: 7500,
+          team: u.team,
+          casterId: u.id,
+          casterName: u.name
+        });
+        this.scene.add(seed.mesh);
+        this.projectiles.push(seed);
+      } else {
+        u.npcAbilityTimer = 6.5;
+        const rawTarget = u.group.position.clone().addScaledVector(flatDir, 12.0);
+        const resolved = this.mapBuilder.resolveHorizontalCollision(rawTarget.x, rawTarget.z, 1.5, u.group.position.y);
+        const targetPos = new THREE.Vector3(
+          resolved.x,
+          this.mapBuilder.getFloorHeight(resolved.x, resolved.z, u.group.position.y),
+          resolved.z
+        );
+        const meteor = new MaximumMeteorProjectile({
+          targetPos,
+          blastRadius: 8.5,
+          damage: this.aiAttackingEnabled ? 35 : 0,
+          team: u.team,
+          casterId: u.id,
+          casterName: u.name,
+          scene: this.scene
+        });
+        this.scene.add(meteor.mesh);
+        this.projectiles.push(meteor);
+      }
+      return;
+    }
+
+    // ── 2. MEGUMI SHOWCASE: Broadsword Cleave, Shadow Step, Rabbit Escape Leap, Nue Swoop ──
+    if (hero.id === 'megumi') {
+      if (stepIndex === 0) {
+        u.npcAbilityTimer = 3.0;
+        const slashPos = u.group.position.clone().add(new THREE.Vector3(0, 1.3, 0)).addScaledVector(flatDir, 2.2);
+        this.spawnMeleeArcVfx(slashPos, 3.6, '#6366f1');
+        this.spawnCursedBurst(slashPos, 'SHADOW', 1.1, 22);
+      } else if (stepIndex === 1) {
+        u.npcAbilityTimer = 4.0;
+        const p = u.group.position.clone();
+        this.spawnImpactRing(p.clone().add(new THREE.Vector3(0, 0.14, 0)), '#4f46e5', 3.0);
+        this.spawnCursedBurst(p.clone().add(new THREE.Vector3(0, 0.5, 0)), 'SHADOW', 1.5, 36);
+        // Hop out of shadows 7m forward
+        const nextX = p.x + flatDir.x * 7.0;
+        const nextZ = p.z + flatDir.z * 7.0;
+        const res = this.mapBuilder.resolveHorizontalCollision(nextX, nextZ, u.radius, p.y);
+        u.group.position.x = res.x;
+        u.group.position.z = res.z;
+        this.clampUnitToDomainBarrier(u);
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.14, 0)), '#818cf8', 2.6);
+      } else if (stepIndex === 2) {
+        u.npcAbilityTimer = 4.6;
+        // Rabbit Escape swarm + high upward leap!
+        u.verticalVel = 22.0;
+        u.group.position.y += 0.35;
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 4.2);
+        this.spawnCursedBurst(u.group.position.clone().add(new THREE.Vector3(0, 0.7, 0)), 'SHADOW', 2.0, 42);
+        for (let r = 0; r < 6; r++) {
+          const ang = (r / 6) * Math.PI * 2;
+          const rx = u.group.position.x + Math.cos(ang) * 1.8;
+          const rz = u.group.position.z + Math.sin(ang) * 1.8;
+          const res = this.mapBuilder.resolveHorizontalCollision(rx, rz, 0.42, u.group.position.y);
+          const rabbit = new RabbitEscapeShikigami({
+            spawnPos: new THREE.Vector3(
+              res.x,
+              this.mapBuilder.getFloorHeight(res.x, res.z, u.group.position.y),
+              res.z
+            ),
+            team: u.team,
+            summonerId: u.id,
+            hopPhase: r * 1.1,
+            scatterAngle: ang,
+            createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+          });
+          rabbit.remainingLifetimeSec = 4.5;
+          this.scene.add(rabbit.group);
+          this.units.push(rabbit);
+        }
+      } else {
+        u.npcAbilityTimer = 4.8;
+        const tRaw = u.group.position.clone().addScaledVector(flatDir, 11.0);
+        const res = this.mapBuilder.resolveHorizontalCollision(tRaw.x, tRaw.z, 1.0, u.group.position.y);
+        const tPos = new THREE.Vector3(
+          res.x,
+          this.mapBuilder.getFloorHeight(res.x, res.z, u.group.position.y),
+          res.z
+        );
+        const nue = new NueShikigami({
+          startPos: u.group.position.clone().add(new THREE.Vector3(0, 6.2, 0)),
+          targetPos: tPos,
+          shockRadius: 5.0,
+          damage: this.aiAttackingEnabled ? 22 : 0,
+          stunSec: 1.0,
+          team: u.team,
+          summonerId: u.id,
+          createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+        });
+        this.scene.add(nue.group);
+        this.units.push(nue);
+      }
+      return;
+    }
+
+    // ── 3. HIGURUMA SHOWCASE: Judge's Gavel Cleave, Gavel Rush, Verdict Wave, Earthshatter ──
+    if (hero.id === 'higuruma') {
+      if (stepIndex === 0) {
+        u.npcAbilityTimer = 3.0;
+        const slashPos = u.group.position.clone().add(new THREE.Vector3(0, 1.35, 0)).addScaledVector(flatDir, 2.8);
+        this.spawnMeleeArcVfx(slashPos, 4.4, '#f59e0b');
+        this.physicsWorld?.applyRadialImpulse(slashPos, 5.5, 22, 0.4, 30);
+      } else if (stepIndex === 1) {
+        u.npcAbilityTimer = 3.8;
+        const startPos = u.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
+        const dashDist = 11.0;
+        for (let s = 1; s <= 7; s++) {
+          const res = this.mapBuilder.resolveHorizontalCollision(
+            u.group.position.x + flatDir.x * (dashDist / 7),
+            u.group.position.z + flatDir.z * (dashDist / 7),
+            u.radius,
+            u.group.position.y
+          );
+          u.group.position.x = res.x;
+          u.group.position.z = res.z;
+          this.clampUnitToDomainBarrier(u);
+        }
+        const endPos = u.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
+        this.spawnBeamTracer(startPos, endPos, '#f59e0b', 0.48, 0.28);
+        this.spawnImpactRing(endPos, '#f59e0b', 4.2);
+      } else if (stepIndex === 2) {
+        u.npcAbilityTimer = 4.0;
+        const wavePos = origin.clone().addScaledVector(flatDir, 1.8);
+        const waveVel = flatDir.clone().multiplyScalar(24);
+        const waveMesh = new THREE.Mesh(
+          new THREE.TorusGeometry(1.3, 0.2, 8, 22, Math.PI * 1.15),
+          new THREE.MeshBasicMaterial({ color: '#fbbf24', side: THREE.DoubleSide })
+        );
+        waveMesh.position.copy(wavePos);
+        waveMesh.lookAt(wavePos.clone().add(flatDir));
+        this.scene.add(waveMesh);
+        this.vfxList.push({
+          mesh: waveMesh,
+          age: 0,
+          maxAge: 1.4,
+          onUpdate: (vdt) => {
+            waveMesh.position.addScaledVector(waveVel, vdt);
+          }
+        });
+      } else {
+        u.npcAbilityTimer = 5.4;
+        for (let k = 1; k <= 4; k++) {
+          const stepPos = u.group.position.clone().addScaledVector(flatDir, k * 3.8);
+          this.spawnImpactRing(stepPos.clone().add(new THREE.Vector3(0, 0.15, 0)), '#facc15', k * 2.0);
+          this.spawnPillarEffect(stepPos, 0.7 + k * 0.2, 3.8, '#facc15', 0.85);
+        }
+        this.physicsWorld?.applyRadialImpulse(
+          u.group.position.clone().addScaledVector(flatDir, 6.0),
+          8.5,
+          30,
+          0.55,
+          45
+        );
+      }
+      return;
+    }
+
+    // ── 3b. URO TAKAKO SHOWCASE: Sky-Warping Palm Strikes, Sky Pull, Sky Veil Deflect, Thin Ice Breaker ──
+    if (hero.id === 'uro') {
+      if (stepIndex === 0) {
+        u.npcAbilityTimer = 2.8;
+        const slashPos = u.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)).addScaledVector(flatDir, 2.8);
+        this.spawnMeleeArcVfx(slashPos, 4.4, '#67e8f9');
+        this.spawnCursedBurst(slashPos, 'SKY', 1.4, 28);
+      } else if (stepIndex === 1) {
+        u.npcAbilityTimer = 3.6;
+        const startPos = u.group.position.clone().add(new THREE.Vector3(0, 1.2, 0));
+        const dashDist = 9.0;
+        const res = this.mapBuilder.resolveHorizontalCollision(
+          u.group.position.x + flatDir.x * dashDist,
+          u.group.position.z + flatDir.z * dashDist,
+          u.radius,
+          u.group.position.y
+        );
+        u.group.position.x = res.x;
+        u.group.position.z = res.z;
+        u.verticalVel = 14.5;
+        u.group.position.y = Math.max(u.group.position.y, 0.25);
+        this.clampUnitToDomainBarrier(u);
+        const endPos = u.group.position.clone().add(new THREE.Vector3(0, 2.2, 0));
+        this.spawnBeamTracer(startPos, endPos, '#67e8f9', 0.36, 0.16);
+        this.spawnImpactRing(startPos, '#67e8f9', 3.4);
+        this.spawnCursedBurst(endPos, 'SKY', 1.8, 36);
+      } else if (stepIndex === 2) {
+        u.npcAbilityTimer = 3.4;
+        u.npcShieldTimer = 2.4;
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)), '#67e8f9', 3.6);
+      } else {
+        u.npcAbilityTimer = 4.6;
+        const shatterPos = origin.clone().addScaledVector(flatDir, 5.2);
+        this.spawnThinIceShatterVfx(shatterPos, flatDir, 5.8, 0.85);
+        this.spawnImpactRing(shatterPos, '#bae6fd', 5.8);
+        this.spawnCursedBurst(shatterPos, 'SKY', 2.4, 64);
+        this.physicsWorld?.applyRadialImpulse(shatterPos, 9.0, 34, 0.55, 85);
+        if (this.aiAttackingEnabled) {
+          this.damageTargetsAroundNpc(u, shatterPos, 5.8, 28, 'Thin Ice Breaker');
+        }
+      }
+      return;
+    }
+
+    // ── 4. MR. BIOMASTER SHOWCASE: Bio-Rupture, Thruster Surge, Siphon Ray, Pandemic Garden ──
     const distToPlayer =
       this.playerRespawnTimer <= 0 ? u.group.position.distanceTo(this.playerPos) : Infinity;
 
-    let targetPos: THREE.Vector3;
-    if (distToPlayer <= 36) {
-      targetPos = this.playerPos.clone().add(new THREE.Vector3(0, 1.25, 0));
-    } else {
-      const otherNpc = this.units.find((other) => other.alive && other !== u);
-      if (otherNpc && u.group.position.distanceTo(otherNpc.group.position) <= 36) {
-        targetPos = otherNpc.group.position.clone().add(new THREE.Vector3(0, 1.25, 0));
-      } else {
-        const yaw = u.group.rotation.y;
-        targetPos = origin.clone().add(new THREE.Vector3(Math.sin(yaw) * 14, 0, Math.cos(yaw) * 14));
-      }
-    }
-
-    const toTarget = targetPos.clone().sub(origin);
-    const flatDir = new THREE.Vector3(toTarget.x, 0, toTarget.z);
-    if (flatDir.lengthSq() > 0.001) {
-      flatDir.normalize();
-      u.group.rotation.y = Math.atan2(flatDir.x, flatDir.z);
-    } else {
-      flatDir.set(Math.sin(u.group.rotation.y), 0, Math.cos(u.group.rotation.y));
-    }
-    const aimDir = toTarget.lengthSq() > 0.001 ? toTarget.clone().normalize() : flatDir.clone();
-
-    const stepIndex = u.npcAbilityIndex ?? 0;
-    u.npcAbilityIndex = (stepIndex + 1) % 5;
-
-    // Mr. Biomaster (or any other NPC Hero) ability rotation
     if (stepIndex === 0) {
-      // 1. Primary Fire: Bio-Rupture Gauntlet (M1)
-      u.npcAbilityTimer = 2.4;
-      const endPt = origin.clone().addScaledVector(aimDir, Math.min(hero.weapon.range, 20));
-      this.spawnBeamTracer(origin, endPt, hero.weapon.projectileColor, 0.22, 0.08);
-      this.spawnImpactRing(endPt, hero.weapon.projectileColor, 1.8);
-      if (distToPlayer <= 20) {
-        this.applyDamageToPlayer(18, u.name, u.team);
-      }
+      u.npcAbilityTimer = 3.2;
+      const endPt = origin.clone().addScaledVector(aimDir, 16);
+      this.spawnBeamTracer(origin, endPt, hero.weapon.projectileColor, 0.25, 0.09);
+      this.spawnImpactRing(endPt, hero.weapon.projectileColor, 2.0);
     } else if (stepIndex === 1) {
-      // 2. SHIFT: Bio-Thruster Surge (Dash + Impact Shockwave)
-      u.npcAbilityTimer = 3.0;
+      u.npcAbilityTimer = 3.8;
       const startPos = u.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
-      const dashDist = 11.5;
-      for (let s = 1; s <= 8; s++) {
-        const nx = u.group.position.x + flatDir.x * (dashDist / 8);
-        const nz = u.group.position.z + flatDir.z * (dashDist / 8);
+      const dashDist = 10.5;
+      for (let s = 1; s <= 7; s++) {
+        const nx = u.group.position.x + flatDir.x * (dashDist / 7);
+        const nz = u.group.position.z + flatDir.z * (dashDist / 7);
         const resolved = this.mapBuilder.resolveHorizontalCollision(nx, nz, u.radius, u.group.position.y);
         u.group.position.x = resolved.x;
         u.group.position.z = resolved.z;
         this.clampUnitToDomainBarrier(u);
       }
-      u.group.position.y = this.mapBuilder.getFloorHeight(
-        u.group.position.x,
-        u.group.position.z,
-        u.group.position.y
-      );
       const endPos = u.group.position.clone().add(new THREE.Vector3(0, 1.1, 0));
       this.spawnBeamTracer(startPos, endPos, hero.abilities.SHIFT.color, 0.45, 0.24);
       this.spawnImpactRing(endPos, hero.abilities.SHIFT.color, hero.abilities.SHIFT.radius);
-      this.damageTargetsAroundNpc(u, u.group.position, hero.abilities.SHIFT.radius, 24, hero.abilities.SHIFT.name);
-    } else if (stepIndex === 2) {
-      // 3. E: Cellular Siphon Ray (Siphon Beam + Self-Heal)
-      u.npcAbilityTimer = 3.2;
-      const beamEnd =
-        distToPlayer <= hero.abilities.E.radius
-          ? this.playerPos.clone().add(new THREE.Vector3(0, 1.2, 0))
-          : origin.clone().addScaledVector(aimDir, 14);
-      this.spawnBeamTracer(origin, beamEnd, hero.abilities.E.color, 0.65, 0.16);
-      this.spawnImpactRing(beamEnd, hero.abilities.E.color, 2.2);
-      u.hp = Math.min(u.maxHp, u.hp + 45);
-      if (distToPlayer <= hero.abilities.E.radius) {
-        this.applyDamageToPlayer(25, u.name, u.team);
+      if (this.aiAttackingEnabled) {
+        this.damageTargetsAroundNpc(u, u.group.position, hero.abilities.SHIFT.radius, 20, hero.abilities.SHIFT.name);
       }
-    } else if (stepIndex === 3) {
-      // 4. Secondary Fire: Helix Spore Volley (M2)
-      u.npcAbilityTimer = 3.0;
-      const sporeTarget =
-        distToPlayer <= 28
-          ? this.playerPos.clone().add(new THREE.Vector3(0, 0.3, 0))
-          : u.group.position.clone().addScaledVector(flatDir, 10);
+    } else if (stepIndex === 2) {
+      u.npcAbilityTimer = 3.8;
+      const sporeTarget = u.group.position.clone().addScaledVector(flatDir, 10);
       this.spawnBeamTracer(origin, sporeTarget, hero.secondaryFire.color, 0.35, 0.14);
       this.spawnImpactRing(sporeTarget, hero.secondaryFire.color, 4.5);
       this.spawnPillarEffect(sporeTarget, 1.1, 4.2, hero.secondaryFire.color, 0.45);
-      this.damageTargetsAroundNpc(u, sporeTarget, 4.5, 28, hero.secondaryFire.name);
+      if (this.aiAttackingEnabled) {
+        this.damageTargetsAroundNpc(u, sporeTarget, 4.5, 22, hero.secondaryFire.name);
+      }
     } else {
-      // 5. Q Ultimate: Domain: Pandemic Garden
-      u.npcAbilityTimer = 5.0;
+      u.npcAbilityTimer = 5.2;
       const center = u.group.position.clone();
-      this.spawnImpactRing(center.clone().add(new THREE.Vector3(0, 0.15, 0)), hero.abilities.Q.color, 9.5);
-      this.spawnPillarEffect(center, 3.2, 9.0, hero.abilities.Q.color, 1.35);
-      this.damageTargetsAroundNpc(u, center, 8.5, 32, hero.abilities.Q.name);
+      this.spawnImpactRing(center.clone().add(new THREE.Vector3(0, 0.15, 0)), hero.abilities.Q.color, 9.0);
+      this.spawnPillarEffect(center, 3.0, 8.5, hero.abilities.Q.color, 1.25);
+      if (this.aiAttackingEnabled && distToPlayer <= 8.5) {
+        this.damageTargetsAroundNpc(u, center, 8.5, 24, hero.abilities.Q.name);
+      }
     }
   }
 
@@ -4299,59 +5947,19 @@ export class FpsMobaEngine {
   }
 
   private launchNpcGojoRedOrb(caster: MobaUnit, startPos: THREE.Vector3, dir: THREE.Vector3, ratio = 0.3) {
-    const orbRadius = 0.28 + ratio * 0.42;
-    const speed = 26 + ratio * 12;
-    const splash = 2.0 + ratio * 2.4;
     const damage = Math.round(22 + ratio * 24);
-    const vel = dir.clone().multiplyScalar(speed);
-    const redOrb = createCursedEnergyOrb({ variant: 'RED', radius: orbRadius });
-    redOrb.group.position.copy(startPos);
-    this.scene.add(redOrb.group);
-
-    let exploded = false;
-    const detonate = (impactPos: THREE.Vector3) => {
-      if (exploded) return;
-      exploded = true;
-      this.spawnImpactRing(impactPos, '#ff2a55', splash);
-      this.spawnPillarEffect(impactPos, 0.55 + ratio * 0.5, 3.8 + ratio * 2, '#f43f5e', 0.38);
-      this.damageTargetsAroundNpc(caster, impactPos, splash, damage, 'Reversal Red');
-    };
-
-    this.vfxList.push({
-      mesh: redOrb.group,
-      age: 0,
-      maxAge: 2.1,
-      onUpdate: (dt, progress) => {
-        if (exploded) {
-          redOrb.group.scale.multiplyScalar(0.65);
-          return;
-        }
-        redOrb.update(dt, this.clock.getElapsedTime());
-        const prevPos = redOrb.group.position.clone();
-        redOrb.group.position.addScaledVector(vel, dt);
-
-        // Check collision with domain barriers from outside
-        for (const dom of this.activeDomains) {
-          const bHit = dom.raycastBarrier(prevPos, dir, speed * dt + orbRadius);
-          if (bHit) {
-            detonate(bHit.point);
-            this.damageDomainBarrier(dom, damage, bHit.point, caster.name);
-            return;
-          }
-        }
-
-        if (
-          this.playerRespawnTimer <= 0 &&
-          redOrb.group.position.distanceTo(this.playerPos.clone().add(new THREE.Vector3(0, 1.1, 0))) <= 1.35
-        ) {
-          detonate(redOrb.group.position.clone());
-          return;
-        }
-        if (redOrb.group.position.y <= 0.25 || progress >= 0.95) {
-          detonate(redOrb.group.position.clone());
-        }
-      }
+    const proj = new ReversalRedProjectile({
+      startPos,
+      forward: dir,
+      chargeRatio: ratio,
+      damage,
+      knockback: THREE.MathUtils.lerp(1.5, 11.0, Math.pow(ratio, 1.25)),
+      team: caster.team,
+      casterId: caster.id,
+      casterName: caster.name,
+      caster
     });
+    this.spawnProjectile(proj);
   }
 
   /**
@@ -4399,106 +6007,42 @@ export class FpsMobaEngine {
     dir: THREE.Vector3,
     domainFinisher = false
   ) {
-    const fusionGroup = new THREE.Group();
-    const redOrb = createCursedEnergyOrb({ variant: 'RED', radius: 0.42, withLight: false });
-    const blueOrb = createCursedEnergyOrb({ variant: 'BLUE', radius: 0.42, withLight: false });
-    const purpleOrb = createCursedEnergyOrb({ variant: 'PURPLE', radius: 1.35 });
-    purpleOrb.group.visible = false;
-    fusionGroup.add(redOrb.group, blueOrb.group, purpleOrb.group);
-    fusionGroup.position.copy(origin).addScaledVector(dir, 1.4);
-    this.scene.add(fusionGroup);
+    const startPos = origin.clone().addScaledVector(dir, 1.4);
+    const purpleProj = new HollowPurpleProjectile({
+      startPos,
+      forward: dir,
+      team: caster.team,
+      casterId: caster.id,
+      casterName: caster.name,
+      caster,
+      domainFinisher,
+      fusionDuration: 4.85,
+      maxAge: 7.8
+    });
+    this.spawnProjectile(purpleProj);
 
     // ── 3D Spatial Audio: Localized to the spiraling orbs & flying singularity ──
-    this.playSpatialSound('/assets/sounds/gojo/hollow_purple_start.mp3', fusionGroup, {
-      volume: 1.0,
-      refDistance: 8,
-      maxDistance: 52,
-      rolloff: 1.1
-    });
-
-    const fusionDuration = 0.75;
-    const totalDuration = 2.6;
-    let launched = false;
-    let hitPlayer = false;
-    const right = new THREE.Vector3(-dir.z, 0, dir.x).normalize();
-
-    this.vfxList.push({
-      mesh: fusionGroup,
-      age: 0,
-      maxAge: totalDuration,
-      onUpdate: (dt, progress) => {
-        const now = this.clock.getElapsedTime();
-        const ageSec = progress * totalDuration;
-        if (ageSec < fusionDuration) {
-          const t = ageSec / fusionDuration;
-          const anchor = caster.group.position
-            .clone()
-            .add(new THREE.Vector3(0, 1.45, 0))
-            .addScaledVector(dir, 1.5);
-          fusionGroup.position.copy(anchor);
-          const sep = (1 - t * t) * 1.3;
-          const angle = t * Math.PI * 2.5;
-          const ox = Math.cos(angle) * sep;
-          const oy = Math.sin(angle) * sep * 0.45;
-          redOrb.group.position.set(0, oy, 0).addScaledVector(right, -ox);
-          blueOrb.group.position.set(0, -oy, 0).addScaledVector(right, ox);
-          redOrb.update(dt, now);
-          blueOrb.update(dt, now);
-          if (t > 0.6) {
-            purpleOrb.group.visible = true;
-            purpleOrb.setScale(Math.max(0.08, ((t - 0.6) / 0.4) * 0.8));
-            purpleOrb.update(dt, now);
-          }
-        } else {
-          if (!launched) {
-            launched = true;
-            redOrb.group.visible = false;
-            blueOrb.group.visible = false;
-            purpleOrb.group.visible = true;
-            purpleOrb.setScale(1.0);
-            this.spawnImpactRing(fusionGroup.position.clone(), '#a855f7', 5.0);
-            if (domainFinisher) {
-              // Re-aim at the (heavily slowed) trapped player and end Unlimited Void on launch
-              if (this.playerRespawnTimer <= 0) {
-                dir
-                  .copy(this.playerPos.clone().add(new THREE.Vector3(0, 1.1, 0)))
-                  .sub(fusionGroup.position)
-                  .normalize();
-              }
-              if (this.npcDomain?.casterId === caster.id) this.endNpcDomain();
-            }
-          }
-          purpleOrb.update(dt, now);
-          fusionGroup.position.addScaledVector(dir, 22.0 * dt);
-          if (fusionGroup.position.y < 1.35) fusionGroup.position.y = 1.35;
-
-          if (
-            !hitPlayer &&
-            this.playerRespawnTimer <= 0 &&
-            fusionGroup.position.distanceTo(this.playerPos.clone().add(new THREE.Vector3(0, 1.1, 0))) <= 3.2
-          ) {
-            hitPlayer = true;
-            this.spawnImpactRing(this.playerPos.clone().add(new THREE.Vector3(0, 1.1, 0)), '#a855f7', 4.8);
-            this.applyDamageToPlayer(domainFinisher ? 9999 : 65, `${caster.name} (Hollow Purple)`, caster.team);
-          }
-        }
-      }
+    this.playSpatialSound('/assets/sounds/gojo/murasaki.mp3', purpleProj.mesh, {
+      volume: 0.95,
+      refDistance: 12,
+      maxDistance: 65,
+      rolloff: 1.0
     });
   }
 
   private applyDamageToPlayer(dmg: number, attackerName: string, attackerTeam: MobaTeam) {
     if (this.playerRespawnTimer > 0 || this.winner || !this.isPlayerDestructable) return;
 
-    // Gojo is invulnerable during the 800ms Limitless Teleport cast phase
-    if (this.teleportPhase === 'CASTING') {
+    // Gojo is invulnerable during the 800ms Limitless Teleport cast phase; Megumi is undetected during Shadow Step
+    if (this.teleportPhase === 'CASTING' || this.shadowStepTimer > 0) {
       this.damagePopups.push({
         id: this.popupCounter++,
         x: 50,
         y: 40,
         amount: 0,
-        label: 'INVULNERABLE',
+        label: this.shadowStepTimer > 0 ? 'SHADOW UNDETECTED' : 'INVULNERABLE',
         isCrit: false,
-        color: '#38bdf8',
+        color: this.shadowStepTimer > 0 ? '#a5b4fc' : '#38bdf8',
         ageSec: 0,
         opacity: 1
       });
@@ -4508,11 +6052,31 @@ export class FpsMobaEngine {
 
     let remaining = dmg;
 
-    // 1. Active Barrier Shield (Reinhardt / Brigitte M2) absorbs incoming damage first!
+    // 1. Active Barrier Shield / Uro Sky Veil Deflect absorbs incoming damage first!
     if (this.isBarrierActive() && this.barrierHp > 0) {
       const absorbedByBarrier = Math.min(this.barrierHp, remaining);
       this.barrierHp -= absorbedByBarrier;
       remaining -= absorbedByBarrier;
+      if (this.hero.secondaryFire.kind === 'SKY_DEFLECT' && this.skyDeflectCounterCooldown <= 0) {
+        this.skyDeflectCounterCooldown = 0.55;
+        this.grantAbilityPassive(true);
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+        const ripplePos = this.camera.position.clone().addScaledVector(forward, 2.0);
+        this.spawnImpactRing(ripplePos, '#67e8f9', 3.2);
+        this.spawnCursedBurst(ripplePos, 'SKY', 1.4, 28);
+        this.damagePopups.push({
+          id: this.popupCounter++,
+          x: 50,
+          y: 42,
+          amount: 0,
+          label: 'SKY VEIL DEFLECT',
+          isCrit: true,
+          color: '#67e8f9',
+          ageSec: 0,
+          opacity: 1
+        });
+        if (this.damagePopups.length > 10) this.damagePopups.shift();
+      }
       if (remaining <= 0) return;
     }
 
@@ -4521,6 +6085,10 @@ export class FpsMobaEngine {
       const absorbed = Math.min(this.shield, remaining);
       this.shield -= absorbed;
       remaining -= absorbed;
+    }
+
+    if (remaining > 0) {
+      this.playerOutOfCombatTimer = 0;
     }
 
     this.hp = Math.max(0, this.hp - remaining);
@@ -4532,7 +6100,149 @@ export class FpsMobaEngine {
     }
   }
 
+  private getProjectileContext(): ProjectileContext {
+    return {
+      elapsed: this.clock.getElapsedTime(),
+      scene: this.scene,
+      camera: this.camera,
+      units: this.units,
+      activeDomains: this.activeDomains,
+      raycastObstacles: this.mapBuilder.raycastObstacles,
+      playerPos: this.playerPos,
+      playerAlive: this.playerRespawnTimer <= 0 && this.shadowStepTimer <= 0,
+      playerTeam: 'blue',
+      resolveHorizontalCollision: (nextX, nextZ, radius, y) =>
+        this.mapBuilder.resolveHorizontalCollision(nextX, nextZ, radius, y),
+      getFloorHeight: (x, z, currentY) => this.mapBuilder.getFloorHeight(x, z, currentY),
+      clampUnitToDomainBarrier: (unit) => this.clampUnitToDomainBarrier(unit as MobaUnit),
+      damageUnit: (unit, amount, isCrit, sourceName, hitPos, killVerb) =>
+        this.damageUnit(unit as MobaUnit, amount, isCrit, sourceName, hitPos, killVerb),
+      damageDomainBarrier: (dom, damage, hitPoint, attackerName) =>
+        this.damageDomainBarrier(dom, damage, hitPoint, attackerName),
+      damageTargetsAroundNpc: (caster, center, radius, damage, sourceName) =>
+        this.damageTargetsAroundNpc(caster as MobaUnit, center, radius, damage, sourceName),
+      applyDamageToPlayer: (damage, sourceName, attackerTeam) =>
+        this.applyDamageToPlayer(damage, sourceName, attackerTeam),
+      knockbackUnitWithWallSlam: (unit, dir, dist, bonusDmg) =>
+        this.KnockbackUnitWithWallSlam(unit as MobaUnit, dir, dist, bonusDmg),
+      grantAbilityPassive: (didHit) => this.grantAbilityPassive(didHit),
+      spawnImpactRing: (pos, colorHex, maxRadius) => this.spawnImpactRing(pos, colorHex, maxRadius),
+      spawnCursedBurst: (pos, variant, radius, count) =>
+        this.spawnCursedBurst(pos, variant, radius, count),
+      playSpatialSound: (url, target, opts) => {
+        this.playSpatialSound(url, target, opts);
+      },
+      playGlobalSound: (url, opts) => {
+        this.playGlobalSound(url, opts);
+      },
+      onPlayerPurpleLaunch: () => {
+        this.viewModel.triggerFireRecoil();
+        this.endActiveDomain();
+      },
+      onNpcPurpleLaunch: (casterId) => {
+        if (this.npcDomain?.casterId === casterId) {
+          this.endNpcDomain();
+        }
+      },
+      onPullPlayerVertical: () => {
+        this.playerVel.y = 0;
+        this.grounded = false;
+      },
+      onVolcanoPlant: (pos, normal, team, casterId, damage, radius, durationMs) => {
+        this.plantMiniVolcano(pos, normal, team, casterId, damage, radius, durationMs);
+      },
+      applyPhysicsImpulse: (center, radius, strength, upwardLift, shatterDamage) => {
+        this.physicsWorld?.applyRadialImpulse(center, radius, strength, upwardLift, shatterDamage);
+      },
+      applyPhysicsVortex: (center, radius, pullStrength, swirlStrength, dt) => {
+        this.physicsWorld?.applyVortexForce(center, radius, pullStrength, swirlStrength, dt);
+      },
+      spawnPhysicsDebris: (center, count, colorHex, speed) => {
+        this.physicsWorld?.spawnRubbleBurst(center, count, colorHex, speed);
+      }
+    };
+  }
+
+  private spawnProjectile(proj: Projectile) {
+    this.scene.add(proj.mesh);
+    this.projectiles.push(proj);
+  }
+
+  private updateProjectiles(dt: number) {
+    const ctx = this.getProjectileContext();
+
+    // Uro Takako Sky Veil Deflect (Hold Right Click): catch & redirect enemy projectiles along crosshair
+    const uroSkyDeflectActive =
+      this.playerRespawnTimer <= 0 &&
+      this.hero.secondaryFire.kind === 'SKY_DEFLECT' &&
+      this.isBarrierActive();
+    const uroLookDir = uroSkyDeflectActive
+      ? new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize()
+      : null;
+    const uroCenter = uroSkyDeflectActive
+      ? this.playerPos.clone().add(new THREE.Vector3(0, 1.35, 0))
+      : null;
+
+    for (let i = this.projectiles.length - 1; i >= 0; i--) {
+      const p = this.projectiles[i];
+      if (uroSkyDeflectActive && uroLookDir && uroCenter && p.alive && p.team === 'red') {
+        const toProj = p.position.clone().sub(uroCenter);
+        const dist = toProj.length();
+        if (dist <= 4.8 + p.radius && (dist < 1.8 || toProj.normalize().dot(uroLookDir) >= 0.25)) {
+          if (p.deflect('blue', uroLookDir, 'player', `${this.hero.name} (Sky Deflect)`, 1.35)) {
+            this.grantAbilityPassive(true);
+            this.spawnImpactRing(p.position.clone(), '#67e8f9', 3.4);
+            this.spawnCursedBurst(p.position.clone(), 'SKY', 1.6, 36);
+            this.damagePopups.push({
+              id: this.popupCounter++,
+              x: 50,
+              y: 38,
+              amount: 0,
+              label: 'SKY DEFLECTED!',
+              isCrit: true,
+              color: '#67e8f9',
+              ageSec: 0,
+              opacity: 1
+            });
+            if (this.damagePopups.length > 10) this.damagePopups.shift();
+          }
+        }
+      }
+      p.update(dt, ctx);
+      if (p.finished) {
+        p.dispose(this.scene);
+        this.projectiles.splice(i, 1);
+      }
+    }
+
+    // Check orb-to-orb midair collisions (Red & Blue only; Hollow Purple has canCollideWithOrbs = false)
+    for (let i = 0; i < this.projectiles.length; i++) {
+      const a = this.projectiles[i];
+      if (!a.alive || !a.canCollideWithOrbs) continue;
+      for (let j = i + 1; j < this.projectiles.length; j++) {
+        const b = this.projectiles[j];
+        if (!b.alive || !b.canCollideWithOrbs) continue;
+        if (a.position.distanceTo(b.position) <= a.radius + b.radius + 0.45) {
+          const mid = a.position.clone().add(b.position).multiplyScalar(0.5);
+          a.onCollideWithProjectile(b, mid, ctx);
+          b.onCollideWithProjectile(a, mid, ctx);
+          if (a.kind !== b.kind) {
+            this.spawnImpactRing(mid, '#a855f7', 5.2);
+            this.spawnCursedBurst(mid, 'PURPLE', 2.8, 92);
+            this.physicsWorld?.applyRadialImpulse(mid, 11.5, 58, 0.7, 130);
+          }
+          break;
+        }
+      }
+    }
+  }
+
   private updateVfx(dt: number) {
+    const elapsed = this.clock.getElapsedTime();
+    this.updateProjectiles(dt);
+    this.updateVolcanoes(dt, elapsed);
+    this.updateLowHpTrackers(elapsed);
+
     for (let i = this.vfxList.length - 1; i >= 0; i--) {
       const v = this.vfxList[i];
       v.age += dt;
@@ -4638,6 +6348,28 @@ export class FpsMobaEngine {
       canCastHollowPurple: Boolean(
         this.activeDomain?.isGojoDomain && !this.activeDomain.purpleTriggered
       ),
+      canCastMeteor: Boolean(
+        this.activeDomain?.isJogoDomain && !this.activeDomain.purpleTriggered
+      ),
+      meteorAiming: this.meteorAiming,
+      canSummonMahoraga: Boolean(
+        this.activeDomain?.isMegumiDomain && !this.activeDomain.purpleTriggered
+      ),
+      canCastShatteredSky: Boolean(
+        this.activeDomain?.isUroDomain && !this.activeDomain.purpleTriggered
+      ),
+      isSkyHovering: this.isSkyHovering,
+      isShadowStepping: this.shadowStepTimer > 0,
+      shadowStepRemainingSec: Number(Math.max(0, this.shadowStepTimer).toFixed(1)),
+      canNueCarry: this.nueCarryAvailable && !this.grounded && this.nueCarryTimer <= 0,
+      nueCarryRemainingSec: Number(Math.max(0, this.nueCarryTimer).toFixed(1)),
+      nueToadPreview:
+        this.hero.abilities.E.kind === 'NUE_TOAD'
+          ? this.findToadRescueAlly()
+            ? 'TOAD'
+            : 'NUE'
+          : undefined,
+      mahoragaRogue: this.units.some((u) => u.alive && u instanceof MahoragaShikigami && u.rogue),
       blueCoreHp: blueCore ? Math.round(blueCore.hp) : 0,
       blueCoreMaxHp: blueCore?.maxHp ?? 1600,
       redCoreHp: redCore ? Math.round(redCore.hp) : 0,
@@ -4655,25 +6387,49 @@ export class FpsMobaEngine {
         x: this.playerPos.x,
         z: this.playerPos.z,
         yaw: this.yaw
-      }
+      },
+      mapId: this.mapId,
+      mapName: this.mapId === 'orlando' ? 'ORLANDO // FLORIDA' : 'CYBER SHIBUYA // TOKYO'
     });
   }
 
   public destroy() {
     this.destroyed = true;
     cancelAnimationFrame(this.animFrameId);
+    for (const p of this.projectiles) {
+      p.dispose(this.scene);
+    }
+    this.projectiles.length = 0;
+    for (const v of this.activeVolcanoes) {
+      this.scene.remove(v.group);
+    }
+    this.activeVolcanoes.length = 0;
+    if (this.shadowPuddleMesh) {
+      this.scene.remove(this.shadowPuddleMesh);
+      this.shadowPuddleMesh.geometry.dispose();
+      this.shadowPuddleMesh = null;
+    }
+    for (const marker of this.lowHpTrackers.values()) {
+      this.scene.remove(marker);
+      marker.geometry.dispose();
+    }
+    this.lowHpTrackers.clear();
+    this.endNueCarry();
+    this.cancelMeteorAim();
+    this.physicsWorld?.dispose();
+    this.activeBlueOrb = null;
     this.stopAllAudio();
     if (this.audioListener) {
       try {
         this.camera.remove(this.audioListener);
-        this.audioListener.context.close().catch(() => {});
       } catch {
-        // Ignore audio context close error
+        // Ignore audio listener cleanup error (never close shared THREE.AudioContext singleton!)
       }
     }
     this.audioBuffers.clear();
     this.playerShieldAudio = null;
     this.playerDomainAudio = null;
+    this.playerVoiceAudio = null;
     document.exitPointerLock?.();
     window.removeEventListener('keydown', this.onKeyDownBound);
     window.removeEventListener('keyup', this.onKeyUpBound);

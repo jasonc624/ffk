@@ -84,7 +84,7 @@ export abstract class MobaEntity<T extends string = MobaUnitType | 'BARRIER'> im
     if (!this.isDestructable || !this.alive || amount <= 0) return 0;
     const taken = Math.min(this.hp, amount);
     this.hp = Math.max(0, this.hp - taken);
-    this.outOfCombatTimer = 4.0;
+    this.outOfCombatTimer = 5.0;
     if (this.hp <= 0) {
       this.alive = false;
     }
@@ -129,6 +129,7 @@ export class MobaUnitEntity extends MobaEntity<MobaUnitType> {
   npcShieldTimer?: number;
   npcShieldMesh?: THREE.Mesh;
   npcShieldMat?: THREE.ShaderMaterial;
+  npcShieldAudio?: THREE.PositionalAudio;
   npcCast?: { t: number; dur: number; target: THREE.Vector3; marker: THREE.Group };
   roamPhase?: HeroAnimHint;
   roamTimer?: number;
@@ -136,6 +137,8 @@ export class MobaUnitEntity extends MobaEntity<MobaUnitType> {
   respawnTimer?: number;
   spawnPos?: THREE.Vector3;
   stunTimer?: number;
+  verticalVel?: number;
+  pullActiveTimer?: number;
   knockbackVel?: THREE.Vector3;
 
   constructor(opts: {

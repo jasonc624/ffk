@@ -1,5 +1,35 @@
 import * as THREE from 'three';
 
+let cachedSoftParticleTex: THREE.CanvasTexture | null = null;
+
+/**
+ * Generates a soft-glowing circular radial sprite texture so PointsMaterial
+ * renders crisp glowing energy sparks instead of hard-edged WebGL squares.
+ */
+export function getSoftParticleTexture(): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') return null;
+  if (cachedSoftParticleTex) return cachedSoftParticleTex;
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const half = size * 0.5;
+  const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+  grad.addColorStop(0.0, 'rgba(255, 255, 255, 1.0)');
+  grad.addColorStop(0.28, 'rgba(255, 255, 255, 0.85)');
+  grad.addColorStop(0.62, 'rgba(255, 255, 255, 0.22)');
+  grad.addColorStop(1.0, 'rgba(255, 255, 255, 0.0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+
+  cachedSoftParticleTex = new THREE.CanvasTexture(canvas);
+  cachedSoftParticleTex.needsUpdate = true;
+  return cachedSoftParticleTex;
+}
+
 const PLASMA_VERTEX_SHADER = /* glsl */ `
   uniform float uTime;
   uniform float uDisplaceAmp;
@@ -47,6 +77,7 @@ const PLASMA_FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uRimColor;
   uniform float uDarkCore;
   uniform float uOpacity;
+  uniform float uIntensity;
   varying vec3 vNormal;
   varying vec3 vViewDir;
   varying vec3 vLocalPos;
@@ -91,17 +122,18 @@ const PLASMA_FRAGMENT_SHADER = /* glsl */ `
 
     vec3 col;
     if (uDarkCore > 0.5) {
-      // Singularity orb (Lapse Blue / Hollow Purple): deep dark gravity well in center + fierce HDR glowing rim & veins
+      // Singularity orb (Lapse Blue / Hollow Purple): deep dark gravity well in center + saturated glowing rim & veins
       vec3 voidCenter = uCoreColor * 0.08;
-      col = mix(voidCenter, uMidColor * 1.85, smoothstep(0.15, 0.85, fresnel + swirl * 0.45));
-      col += uRimColor * (pow(fresnel, 1.45) * 2.6 + veins * 1.45);
+      col = mix(voidCenter, uMidColor * 1.45, smoothstep(0.16, 0.84, fresnel + swirl * 0.42));
+      col += uRimColor * (pow(fresnel, 1.5) * 1.65 + veins * 0.9);
     } else {
-      // Explosive plasma orb (Reversal Red): blinding HDR hot core + boiling crimson corona
-      col = mix(uMidColor * 1.4, uCoreColor * 2.3, pow(ndotv, 1.35) + veins * 0.45);
-      col = mix(col, uRimColor * 2.4, fresnel * 0.85 + swirl * 0.35);
+      // Explosive plasma orb (Reversal Red): deep saturated crimson core + boiling scarlet corona without white/pink washout
+      col = mix(uMidColor * 1.35, uCoreColor * 1.55, pow(ndotv, 1.25) + veins * 0.32);
+      col = mix(col, uRimColor * 1.6, fresnel * 0.72 + swirl * 0.28);
     }
 
-    float alpha = clamp(uOpacity * (0.78 + fresnel * 0.35 + veins * 0.25), 0.0, 1.0);
+    col *= uIntensity;
+    float alpha = clamp(uOpacity * (0.94 + fresnel * 0.2 + veins * 0.15), 0.0, 1.0);
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -111,6 +143,7 @@ const ACCRETION_RING_FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uColorA;
   uniform vec3 uColorB;
   uniform float uOpacity;
+  uniform float uIntensity;
   varying vec2 vUv;
 
   void main() {
@@ -124,7 +157,7 @@ const ACCRETION_RING_FRAGMENT_SHADER = /* glsl */ `
     float bands = smoothstep(-0.2, 0.85, spiral1 * 0.6 + spiral2 * 0.4);
 
     float radialFade = smoothstep(0.18, 0.42, r) * (1.0 - smoothstep(0.68, 1.0, r));
-    vec3 col = mix(uColorB, uColorA * 1.8, bands);
+    vec3 col = mix(uColorB, uColorA * 1.35, bands) * uIntensity;
     float alpha = radialFade * (0.35 + bands * 0.65) * uOpacity;
     gl_FragColor = vec4(col, alpha);
   }
@@ -223,33 +256,37 @@ export interface CursedOrbOptions {
   variant: 'RED' | 'BLUE' | 'PURPLE';
   radius: number;
   withLight?: boolean;
+  isViewModel?: boolean;
 }
 
 export function createCursedEnergyOrb(opts: CursedOrbOptions): CursedOrbController {
   const group = new THREE.Group();
   const r = opts.radius;
+  // Calibrated intensity + deeply saturated palettes so orbs read rich crimson/cobalt under ACES without white glare
+  const isVm = Boolean(opts.isViewModel);
+  const orbIntensity = isVm ? 0.92 : 1.12;
 
   const palette =
     opts.variant === 'RED'
       ? {
-          core: new THREE.Color(0xffffff),
-          mid: new THREE.Color(0xff1e4d),
-          rim: new THREE.Color(0xff8fa3),
+          core: new THREE.Color(0xff1422),
+          mid: new THREE.Color(0xc40014),
+          rim: new THREE.Color(0xff2838),
           darkCore: 0.0,
-          lightHex: 0xff2a55
+          lightHex: 0xff1422
         }
       : opts.variant === 'BLUE'
         ? {
-            core: new THREE.Color(0x020617),
-            mid: new THREE.Color(0x0284c7),
-            rim: new THREE.Color(0x38bdf8),
+            core: new THREE.Color(0x01051a),
+            mid: new THREE.Color(0x0044ff),
+            rim: new THREE.Color(0x007aff),
             darkCore: 1.0,
-            lightHex: 0x38bdf8
+            lightHex: 0x007aff
           }
         : {
             core: new THREE.Color(0x070112),
             mid: new THREE.Color(0x9333ea),
-            rim: new THREE.Color(0xf0abfc),
+            rim: new THREE.Color(0xe879f9),
             darkCore: 1.0,
             lightHex: 0xc084fc
           };
@@ -263,7 +300,8 @@ export function createCursedEnergyOrb(opts: CursedOrbOptions): CursedOrbControll
       uMidColor: { value: palette.mid },
       uRimColor: { value: palette.rim },
       uDarkCore: { value: palette.darkCore },
-      uOpacity: { value: 0.98 }
+      uOpacity: { value: 1.0 },
+      uIntensity: { value: orbIntensity }
     },
     vertexShader: PLASMA_VERTEX_SHADER,
     fragmentShader: PLASMA_FRAGMENT_SHADER,
@@ -277,12 +315,13 @@ export function createCursedEnergyOrb(opts: CursedOrbOptions): CursedOrbControll
   const coronaMat = new THREE.ShaderMaterial({
     uniforms: {
       uTime: { value: 1.7 },
-      uDisplaceAmp: { value: r * 0.22 },
+      uDisplaceAmp: { value: r * 0.2 },
       uCoreColor: { value: palette.mid },
       uMidColor: { value: palette.rim },
-      uRimColor: { value: new THREE.Color(0xffffff) },
+      uRimColor: { value: palette.rim },
       uDarkCore: { value: 1.0 },
-      uOpacity: { value: 0.52 }
+      uOpacity: { value: isVm ? 0.28 : 0.40 },
+      uIntensity: { value: orbIntensity }
     },
     vertexShader: PLASMA_VERTEX_SHADER,
     fragmentShader: PLASMA_FRAGMENT_SHADER,
@@ -291,7 +330,7 @@ export function createCursedEnergyOrb(opts: CursedOrbOptions): CursedOrbControll
     side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending
   });
-  const coronaMesh = new THREE.Mesh(new THREE.SphereGeometry(r * 1.38, 28, 28), coronaMat);
+  const coronaMesh = new THREE.Mesh(new THREE.SphereGeometry(r * (isVm ? 1.24 : 1.34), 28, 28), coronaMat);
   group.add(coronaMesh);
 
   // 3. Swirling Spiral Accretion Discs (2 intersecting planes)
@@ -300,7 +339,8 @@ export function createCursedEnergyOrb(opts: CursedOrbOptions): CursedOrbControll
       uTime: { value: 0 },
       uColorA: { value: palette.rim },
       uColorB: { value: palette.mid },
-      uOpacity: { value: 0.85 }
+      uOpacity: { value: isVm ? 0.34 : 0.48 },
+      uIntensity: { value: orbIntensity }
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -316,8 +356,8 @@ export function createCursedEnergyOrb(opts: CursedOrbOptions): CursedOrbControll
     blending: THREE.AdditiveBlending
   });
 
-  const disc1 = new THREE.Mesh(new THREE.PlaneGeometry(r * 3.4, r * 3.4), ringMat);
-  const disc2 = new THREE.Mesh(new THREE.PlaneGeometry(r * 3.1, r * 3.1), ringMat);
+  const disc1 = new THREE.Mesh(new THREE.PlaneGeometry(r * (isVm ? 2.1 : 3.0), r * (isVm ? 2.1 : 3.0)), ringMat);
+  const disc2 = new THREE.Mesh(new THREE.PlaneGeometry(r * (isVm ? 1.9 : 2.7), r * (isVm ? 1.9 : 2.7)), ringMat);
   disc2.rotation.x = Math.PI * 0.45;
   disc2.rotation.y = Math.PI * 0.25;
   group.add(disc1, disc2);
@@ -349,11 +389,14 @@ export function createCursedEnergyOrb(opts: CursedOrbOptions): CursedOrbControll
   }
   const pGeo = new THREE.BufferGeometry();
   pGeo.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
+  const softParticleMap = getSoftParticleTexture();
   const pMat = new THREE.PointsMaterial({
     color: palette.rim,
-    size: Math.max(0.08, r * 0.18),
+    map: softParticleMap ?? undefined,
+    size: isVm ? Math.max(0.012, r * 0.65) : Math.max(0.1, r * 0.24),
     transparent: true,
-    opacity: 0.88,
+    opacity: isVm ? 0.72 : 0.88,
+    alphaTest: 0.01,
     blending: THREE.AdditiveBlending,
     depthWrite: false
   });
@@ -777,9 +820,11 @@ export function createUnlimitedVoidDomainVfx(
   starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
   const starMat = new THREE.PointsMaterial({
     color: 0xe0f2fe,
-    size: 0.14,
+    map: getSoftParticleTexture() ?? undefined,
+    size: 0.18,
     transparent: true,
     opacity: 0.0,
+    alphaTest: 0.01,
     blending: THREE.AdditiveBlending,
     depthWrite: false
   });
@@ -822,6 +867,918 @@ export function createUnlimitedVoidDomainVfx(
 
     starMat.opacity = bhAppear * 0.78;
     starPoints.rotation.y = elapsed * 0.04;
+  };
+
+  return { root, update };
+}
+
+export interface CursedExplosionController {
+  group: THREE.Group;
+  update: (dt: number, progress: number) => void;
+}
+
+/**
+ * Radial burst of glowing circular cursed-energy sparks & embers for orb impacts/explosions.
+ */
+export function createCursedExplosionParticles(opts: {
+  variant: 'RED' | 'BLUE' | 'PURPLE' | 'FIRE' | 'SHADOW' | 'SKY';
+  radius?: number;
+  count?: number;
+}): CursedExplosionController {
+  const group = new THREE.Group();
+  const count = opts.count ?? 72;
+  const spread = opts.radius ?? 1.8;
+
+  const colors =
+    opts.variant === 'RED'
+      ? { primary: 0xff2a55, secondary: 0xff99aa }
+      : opts.variant === 'BLUE'
+        ? { primary: 0x0ea5e9, secondary: 0x7dd3fc }
+        : opts.variant === 'FIRE'
+          ? { primary: 0xff3b00, secondary: 0xfacc15 }
+          : opts.variant === 'SHADOW'
+            ? { primary: 0x312e81, secondary: 0x818cf8 }
+            : opts.variant === 'SKY'
+              ? { primary: 0x67e8f9, secondary: 0xf0f9ff }
+              : { primary: 0xa855f7, secondary: 0xf0abfc };
+
+  const positions = new Float32Array(count * 3);
+  const velocities = new Float32Array(count * 3);
+  const colorArr = new Float32Array(count * 3);
+  const c1 = new THREE.Color(colors.primary);
+  const c2 = new THREE.Color(colors.secondary);
+  const tmpColor = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const dirX = Math.sin(phi) * Math.cos(theta);
+    const dirY = Math.sin(phi) * Math.sin(theta);
+    const dirZ = Math.cos(phi);
+
+    const initR = Math.random() * spread * 0.18;
+    positions[i * 3] = dirX * initR;
+    positions[i * 3 + 1] = dirY * initR;
+    positions[i * 3 + 2] = dirZ * initR;
+
+    const speed = spread * (1.8 + Math.random() * 4.2);
+    velocities[i * 3] = dirX * speed;
+    velocities[i * 3 + 1] = dirY * speed + (0.4 + Math.random() * 1.4);
+    velocities[i * 3 + 2] = dirZ * speed;
+
+    tmpColor.copy(c1).lerp(c2, Math.random());
+    colorArr[i * 3] = tmpColor.r;
+    colorArr[i * 3 + 1] = tmpColor.g;
+    colorArr[i * 3 + 2] = tmpColor.b;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colorArr, 3));
+
+  const baseSize = Math.max(0.16, Math.min(0.45, spread * 0.16));
+  const mat = new THREE.PointsMaterial({
+    map: getSoftParticleTexture() ?? undefined,
+    size: baseSize,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.95,
+    alphaTest: 0.01,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+
+  const points = new THREE.Points(geo, mat);
+  group.add(points);
+
+  const update = (dt: number, progress: number) => {
+    const pos = geo.attributes.position.array as Float32Array;
+    const drag = Math.exp(-3.4 * dt);
+    const gravity = opts.variant === 'BLUE' ? -1.8 : -4.2;
+
+    for (let i = 0; i < count; i++) {
+      const idx = i * 3;
+      velocities[idx] *= drag;
+      velocities[idx + 1] = velocities[idx + 1] * drag + gravity * dt;
+      velocities[idx + 2] *= drag;
+
+      pos[idx] += velocities[idx] * dt;
+      pos[idx + 1] += velocities[idx + 1] * dt;
+      pos[idx + 2] += velocities[idx + 2] * dt;
+    }
+    geo.attributes.position.needsUpdate = true;
+
+    const fade = Math.max(0, 1 - progress * progress);
+    mat.opacity = 0.95 * fade;
+    mat.size = baseSize * (0.55 + 0.65 * fade);
+  };
+
+  return { group, update };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  JOGO DOMAIN EXPANSION: COFFIN OF THE IRON MOUNTAIN (CENTER OF THE EARTH)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VOLCANIC_NOISE_GLSL = /* glsl */ `
+  float vHash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float vNoise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(mix(vHash(i + vec3(0,0,0)), vHash(i + vec3(1,0,0)), f.x),
+          mix(vHash(i + vec3(0,1,0)), vHash(i + vec3(1,1,0)), f.x), f.y),
+      mix(mix(vHash(i + vec3(0,0,1)), vHash(i + vec3(1,0,1)), f.x),
+          mix(vHash(i + vec3(0,1,1)), vHash(i + vec3(1,1,1)), f.x), f.y),
+      f.z
+    );
+  }
+  float fbm(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+      v += a * vNoise(p);
+      p = p * 2.03 + vec3(13.1, 7.7, 5.3);
+      a *= 0.5;
+    }
+    return v;
+  }
+`;
+
+const IRON_MOUNTAIN_DOME_FRAGMENT_SHADER = /* glsl */ `
+  uniform float uTime;
+  uniform float uAge;
+  varying vec3 vLocalPos;
+  varying vec3 vNormal;
+
+  ${VOLCANIC_NOISE_GLSL}
+
+  void main() {
+    vec3 dir = normalize(vLocalPos);
+    float h = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+
+    // Volcanic cavern rock strata + flowing incandescent magma veins
+    float rockNoise = fbm(dir * 5.2 + vec3(0.0, -uTime * 0.04, 0.0));
+    float crackA = fbm(dir * 7.5 + vec3(uTime * 0.14, -uTime * 0.22, uTime * 0.08));
+    float crackB = fbm(dir * 12.0 - vec3(uTime * 0.1, uTime * 0.35, -uTime * 0.12));
+    float ridge = 1.0 - abs(crackA * 2.0 - 1.0);
+    float magmaVeins = pow(clamp(ridge, 0.0, 1.0), 4.2) * (0.7 + 0.3 * sin(uTime * 3.5 + crackB * 8.0));
+
+    // Glowing molten caldera base rising up the walls
+    float baseHeat = smoothstep(0.62, 0.18, h);
+    vec3 obsidian = vec3(0.07, 0.025, 0.02) * (0.65 + rockNoise * 0.7);
+    vec3 crimsonLava = vec3(0.95, 0.14, 0.02);
+    vec3 moltenGold = vec3(1.0, 0.68, 0.12);
+
+    vec3 col = mix(obsidian, crimsonLava * 0.55, baseHeat * (0.45 + rockNoise * 0.55));
+    col += mix(crimsonLava, moltenGold, clamp(magmaVeins * 1.4, 0.0, 1.0)) * magmaVeins * 1.85;
+
+    // Fiery zenith caldera glow directly overhead (where Maximum: Meteor descends)
+    float zenith = smoothstep(0.75, 0.99, dir.y);
+    col += vec3(1.0, 0.32, 0.05) * zenith * (0.55 + 0.25 * sin(uTime * 2.6 + rockNoise * 6.0));
+
+    float appear = smoothstep(0.0, 0.75, uAge);
+    gl_FragColor = vec4(col, 0.93 * appear);
+  }
+`;
+
+export function createIronMountainDomainVfx(
+  center: THREE.Vector3,
+  radius: number
+): UnlimitedVoidDomainController {
+  const root = new THREE.Group();
+  root.position.copy(center);
+
+  // 1. Center-of-the-Earth Volcanic Cavern Dome (visible inside & outside)
+  const domeMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uAge: { value: 0 }
+    },
+    vertexShader: /* glsl */ `
+      varying vec3 vLocalPos;
+      varying vec3 vNormal;
+      void main() {
+        vLocalPos = position;
+        vNormal = normal;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: IRON_MOUNTAIN_DOME_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  });
+  const domeMesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 42, 30), domeMat);
+  root.add(domeMesh);
+
+  // 2. Molten Magma Floor Overlay Glow inside the Domain
+  const floorMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uAge: { value: 0 }
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform float uAge;
+      varying vec2 vUv;
+      ${VOLCANIC_NOISE_GLSL}
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float r = length(p);
+        if (r > 1.0) discard;
+        float n = fbm(vec3(p * 6.0, uTime * 0.25));
+        float cracks = pow(1.0 - abs(n * 2.0 - 1.0), 4.0);
+        float edgeGlow = smoothstep(0.68, 0.98, r);
+        vec3 lava = mix(vec3(0.95, 0.18, 0.02), vec3(1.0, 0.72, 0.14), cracks);
+        float alpha = (cracks * 0.55 + edgeGlow * 0.45) * smoothstep(0.0, 0.6, uAge) * 0.72;
+        gl_FragColor = vec4(lava, alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending
+  });
+  const floorDisc = new THREE.Mesh(new THREE.CircleGeometry(radius * 0.98, 48), floorMat);
+  floorDisc.rotation.x = -Math.PI / 2;
+  floorDisc.position.y = 0.06;
+  root.add(floorDisc);
+
+  // 3. Jagged Volcanic Basalt Spires ringing the inner perimeter
+  const spireMat = new THREE.MeshStandardMaterial({
+    color: 0x1c1412,
+    emissive: 0xd93800,
+    emissiveIntensity: 0.42,
+    roughness: 0.85,
+    metalness: 0.1
+  });
+  const spireCount = 14;
+  for (let i = 0; i < spireCount; i++) {
+    const angle = (i / spireCount) * Math.PI * 2 + (i % 2) * 0.12;
+    const h = 3.2 + (i % 3) * 1.65;
+    const rBase = 0.9 + (i % 2) * 0.55;
+    const spire = new THREE.Mesh(new THREE.ConeGeometry(rBase, h, 5), spireMat);
+    const dist = radius * 0.88;
+    spire.position.set(Math.cos(angle) * dist, h * 0.45, Math.sin(angle) * dist);
+    spire.rotation.z = (Math.random() - 0.5) * 0.22;
+    spire.rotation.x = (Math.random() - 0.5) * 0.22;
+    root.add(spire);
+  }
+
+  // 4. Rising Volcanic Embers floating upward inside the Center of the Earth
+  const emberCount = 180;
+  const emberPositions = new Float32Array(emberCount * 3);
+  const emberSpeeds = new Float32Array(emberCount);
+  const emberColors = new Float32Array(emberCount * 3);
+  const cHot = new THREE.Color(0xfacc15);
+  const cMagma = new THREE.Color(0xff3b00);
+  const tmpC = new THREE.Color();
+
+  for (let i = 0; i < emberCount; i++) {
+    const dist = 1.0 + Math.random() * (radius * 0.88);
+    const theta = Math.random() * Math.PI * 2;
+    emberPositions[i * 3] = Math.cos(theta) * dist;
+    emberPositions[i * 3 + 1] = Math.random() * (radius * 0.72);
+    emberPositions[i * 3 + 2] = Math.sin(theta) * dist;
+    emberSpeeds[i] = 1.6 + Math.random() * 3.4;
+
+    tmpC.copy(cMagma).lerp(cHot, Math.random());
+    emberColors[i * 3] = tmpC.r;
+    emberColors[i * 3 + 1] = tmpC.g;
+    emberColors[i * 3 + 2] = tmpC.b;
+  }
+
+  const emberGeo = new THREE.BufferGeometry();
+  emberGeo.setAttribute('position', new THREE.BufferAttribute(emberPositions, 3));
+  emberGeo.setAttribute('color', new THREE.BufferAttribute(emberColors, 3));
+  const emberMat = new THREE.PointsMaterial({
+    map: getSoftParticleTexture() ?? undefined,
+    size: 0.28,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.0,
+    alphaTest: 0.01,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const emberPoints = new THREE.Points(emberGeo, emberMat);
+  root.add(emberPoints);
+
+  const maxH = radius * 0.75;
+  const update = (dt: number, elapsed: number, ageSec: number, _cameraPos: THREE.Vector3) => {
+    domeMat.uniforms.uTime.value = elapsed;
+    domeMat.uniforms.uAge.value = ageSec;
+    floorMat.uniforms.uTime.value = elapsed;
+    floorMat.uniforms.uAge.value = ageSec;
+
+    const appear = THREE.MathUtils.smoothstep(ageSec, 0.0, 0.7);
+    emberMat.opacity = appear * 0.9;
+    const pos = emberGeo.attributes.position.array as Float32Array;
+    for (let i = 0; i < emberCount; i++) {
+      const idx = i * 3;
+      pos[idx + 1] += emberSpeeds[i] * dt;
+      pos[idx] += Math.sin(elapsed * 2.2 + i) * 0.35 * dt;
+      pos[idx + 2] += Math.cos(elapsed * 1.9 + i * 1.3) * 0.35 * dt;
+      if (pos[idx + 1] > maxH) {
+        pos[idx + 1] = 0.2;
+      }
+    }
+    emberGeo.attributes.position.needsUpdate = true;
+  };
+
+  return { root, update };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  MEGUMI DOMAIN EXPANSION: CHIMERA SHADOW GARDEN (LIQUID SHADOW FLOOD)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CHIMERA_SHADOW_DOME_FRAGMENT_SHADER = /* glsl */ `
+  uniform float uTime;
+  uniform float uAge;
+  varying vec3 vLocalPos;
+
+  ${VOLCANIC_NOISE_GLSL}
+
+  void main() {
+    vec3 dir = normalize(vLocalPos);
+    float h = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+
+    // Churning liquid ink currents swirling along the shadow shell
+    float n1 = fbm(dir * 4.8 + vec3(uTime * 0.16, -uTime * 0.25, uTime * 0.12));
+    float n2 = fbm(dir * 9.5 - vec3(uTime * 0.22, uTime * 0.18, -uTime * 0.14));
+    float ripples = pow(1.0 - abs(n1 * 2.0 - 1.0), 3.6);
+
+    vec3 abyss = vec3(0.015, 0.018, 0.045);
+    vec3 indigo = vec3(0.18, 0.16, 0.58);
+    vec3 spectral = vec3(0.38, 0.62, 0.96);
+
+    float lowPool = smoothstep(0.65, 0.15, h);
+    vec3 col = mix(abyss, indigo * 0.45, lowPool * (0.4 + n2 * 0.6));
+    col += mix(indigo, spectral, ripples) * ripples * 0.95;
+
+    float appear = smoothstep(0.0, 0.7, uAge);
+    gl_FragColor = vec4(col, 0.88 * appear);
+  }
+`;
+
+export function createChimeraShadowDomainVfx(
+  center: THREE.Vector3,
+  radius: number
+): UnlimitedVoidDomainController {
+  const root = new THREE.Group();
+  root.position.copy(center);
+
+  // 1. Liquid Shadow Enclosing Dome
+  const domeMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uAge: { value: 0 }
+    },
+    vertexShader: /* glsl */ `
+      varying vec3 vLocalPos;
+      void main() {
+        vLocalPos = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: CHIMERA_SHADOW_DOME_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  });
+  const domeMesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 40, 28), domeMat);
+  root.add(domeMesh);
+
+  // 2. Flooded Liquid Shadow Floor Pool
+  const floorMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uAge: { value: 0 }
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform float uAge;
+      varying vec2 vUv;
+      ${VOLCANIC_NOISE_GLSL}
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float r = length(p);
+        if (r > 1.0) discard;
+        float n = fbm(vec3(p * 6.5, uTime * 0.35));
+        float rings = sin(r * 22.0 - uTime * 3.8 + n * 5.0) * 0.5 + 0.5;
+        vec3 ink = vec3(0.02, 0.025, 0.07);
+        vec3 sheen = vec3(0.28, 0.34, 0.88);
+        vec3 col = mix(ink, sheen, pow(rings, 4.0) * 0.55 + smoothstep(0.75, 1.0, r) * 0.5);
+        float alpha = smoothstep(0.0, 0.55, uAge) * 0.92;
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  });
+  const floorPool = new THREE.Mesh(new THREE.CircleGeometry(radius * 0.99, 52), floorMat);
+  floorPool.rotation.x = -Math.PI / 2;
+  floorPool.position.y = 0.07;
+  root.add(floorPool);
+
+  // 3. Skeletal Shadow Spine Arches rising around the Chimera Garden perimeter
+  const boneMat = new THREE.MeshStandardMaterial({
+    color: 0x161726,
+    emissive: 0x312e81,
+    emissiveIntensity: 0.45,
+    roughness: 0.72
+  });
+  const ribCount = 12;
+  for (let i = 0; i < ribCount; i++) {
+    const angle = (i / ribCount) * Math.PI * 2;
+    const rib = new THREE.Mesh(new THREE.TorusGeometry(2.8, 0.22, 8, 18, Math.PI * 0.72), boneMat);
+    const dist = radius * 0.86;
+    rib.position.set(Math.cos(angle) * dist, 0.6, Math.sin(angle) * dist);
+    rib.rotation.y = -angle + Math.PI * 0.5;
+    rib.rotation.z = -0.25;
+    root.add(rib);
+  }
+
+  // 4. Rising Ink & Spectral Shadow Droplets
+  const dropCount = 160;
+  const dropPositions = new Float32Array(dropCount * 3);
+  const dropSpeeds = new Float32Array(dropCount);
+  const dropColors = new Float32Array(dropCount * 3);
+  const cDark = new THREE.Color(0x4338ca);
+  const cGlow = new THREE.Color(0x7dd3fc);
+  const tmpC = new THREE.Color();
+
+  for (let i = 0; i < dropCount; i++) {
+    const d = 1.0 + Math.random() * (radius * 0.9);
+    const th = Math.random() * Math.PI * 2;
+    dropPositions[i * 3] = Math.cos(th) * d;
+    dropPositions[i * 3 + 1] = Math.random() * (radius * 0.65);
+    dropPositions[i * 3 + 2] = Math.sin(th) * d;
+    dropSpeeds[i] = 1.2 + Math.random() * 2.4;
+
+    tmpC.copy(cDark).lerp(cGlow, Math.random() * 0.6);
+    dropColors[i * 3] = tmpC.r;
+    dropColors[i * 3 + 1] = tmpC.g;
+    dropColors[i * 3 + 2] = tmpC.b;
+  }
+
+  const dropGeo = new THREE.BufferGeometry();
+  dropGeo.setAttribute('position', new THREE.BufferAttribute(dropPositions, 3));
+  dropGeo.setAttribute('color', new THREE.BufferAttribute(dropColors, 3));
+  const dropMat = new THREE.PointsMaterial({
+    map: getSoftParticleTexture() ?? undefined,
+    size: 0.26,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.0,
+    alphaTest: 0.01,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const dropPoints = new THREE.Points(dropGeo, dropMat);
+  root.add(dropPoints);
+
+  const maxH = radius * 0.68;
+  const update = (dt: number, elapsed: number, ageSec: number, _cameraPos: THREE.Vector3) => {
+    domeMat.uniforms.uTime.value = elapsed;
+    domeMat.uniforms.uAge.value = ageSec;
+    floorMat.uniforms.uTime.value = elapsed;
+    floorMat.uniforms.uAge.value = ageSec;
+
+    const appear = THREE.MathUtils.smoothstep(ageSec, 0.0, 0.65);
+    dropMat.opacity = appear * 0.85;
+    const pos = dropGeo.attributes.position.array as Float32Array;
+    for (let i = 0; i < dropCount; i++) {
+      const idx = i * 3;
+      pos[idx + 1] += dropSpeeds[i] * dt;
+      pos[idx] += Math.sin(elapsed * 1.8 + i) * 0.25 * dt;
+      pos[idx + 2] += Math.cos(elapsed * 1.6 + i * 1.1) * 0.25 * dt;
+      if (pos[idx + 1] > maxH) {
+        pos[idx + 1] = 0.15;
+      }
+    }
+    dropGeo.attributes.position.needsUpdate = true;
+  };
+
+  return { root, update };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  URO TAKAKO — SKY MANIPULATION: SKY VEIL CURTAIN, THIN ICE BREAKER & DOMAIN
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Warped sky-cloth ShaderMaterial for Uro Takako's Sky Veil Deflect (Hold Right Click).
+ * Bends space like translucent grabbed fabric with iridescent cerulean-pearl refraction.
+ */
+export function createSkyVeilDistortionMaterial(): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uOpacity: { value: 1.0 },
+      uDeployRatio: { value: 0.0 },
+      uPoolRatio: { value: 1.0 }
+    },
+    vertexShader: /* glsl */ `
+      uniform float uTime;
+      uniform float uDeployRatio;
+      varying vec2 vUv;
+      varying float vRipple;
+      void main() {
+        vUv = uv;
+        vec3 pos = position;
+        vec2 p = uv * 2.0 - 1.0;
+        float dist = length(p);
+        // Grabbed-cloth pinch & flowing silk-like sky folds
+        float fold = sin(p.x * 5.2 + uTime * 3.6) * cos(p.y * 4.4 - uTime * 2.9) * 0.11;
+        float pinch = exp(-dist * dist * 3.2) * (0.24 + 0.05 * sin(uTime * 5.0));
+        float wave = sin(dist * 10.5 - uTime * 5.4) * 0.04 * (1.0 - smoothstep(0.4, 1.0, dist));
+        pos.z += (fold + pinch + wave) * max(0.25, uDeployRatio);
+        vRipple = fold * 4.0 + wave * 6.0;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform float uOpacity;
+      uniform float uDeployRatio;
+      uniform float uPoolRatio;
+      varying vec2 vUv;
+      varying float vRipple;
+      ${VOLCANIC_NOISE_GLSL}
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float r = length(p);
+        float edgeMask = 1.0 - smoothstep(0.68, 1.02, r);
+        if (edgeMask <= 0.01) discard;
+
+        // Swirled sky-fabric distortion lines
+        float angle = atan(p.y, p.x);
+        float twist = fbm(vec3(p * 3.2 + vec2(cos(angle + uTime * 0.7), sin(angle - uTime * 0.6)) * 0.35, uTime * 0.4));
+        float silkLines = pow(abs(sin((p.x * 4.0 + p.y * 3.0 + twist * 4.5) * 2.2 - uTime * 2.4)), 6.0);
+        float rim = smoothstep(0.52, 0.94, r) * edgeMask;
+
+        vec3 skyCyan = vec3(0.32, 0.84, 0.98);
+        vec3 lowTint = vec3(0.95, 0.42, 0.58);
+        vec3 baseSky = mix(lowTint, skyCyan, clamp(uPoolRatio * 1.35, 0.0, 1.0));
+        vec3 cloudPearl = vec3(0.92, 0.98, 1.0);
+        vec3 prismPink = vec3(0.76, 0.86, 1.0);
+
+        vec3 col = mix(baseSky, cloudPearl, clamp(twist * 0.7 + vRipple * 0.35, 0.0, 1.0));
+        col += cloudPearl * silkLines * 0.65;
+        col += prismPink * rim * 0.85;
+
+        float alpha = (0.14 + silkLines * 0.28 + rim * 0.42 + smoothstep(0.3, 0.0, r) * 0.14) * edgeMask * uOpacity * uDeployRatio;
+        gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.78));
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending
+  });
+}
+
+export interface ThinIceShatterController {
+  group: THREE.Group;
+  update: (dt: number, progress: number) => void;
+}
+
+/**
+ * Uro Takako's signature "Thin Ice Breaker" crystalline spatial fracture VFX:
+ * renders a shattering glass-pane crack plane in mid-air + exploding refractive sky shards.
+ */
+export function createThinIceShatterEffect(
+  pos: THREE.Vector3,
+  normal: THREE.Vector3,
+  radius: number
+): ThinIceShatterController {
+  const group = new THREE.Group();
+  group.position.copy(pos);
+
+  const forward = normal.clone().normalize();
+  if (forward.lengthSq() < 0.01) forward.set(0, 0, -1);
+  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), forward);
+  group.quaternion.copy(quat);
+
+  // 1. Fractured Thin-Ice Crack Disc Shader
+  const crackMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uProgress: { value: 0 }
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uProgress;
+      varying vec2 vUv;
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float r = length(p);
+        if (r > 1.0) discard;
+
+        float ang = atan(p.y, p.x);
+        // Sharp radial spiderweb fracture lines + concentric ice cracks
+        float spokes = abs(sin(ang * 7.0 + sin(r * 11.0) * 0.55));
+        float crackRadial = smoothstep(0.08, 0.0, spokes) * (1.0 - smoothstep(0.65, 1.0, r));
+        float rings = abs(sin(r * 15.0 + sin(ang * 5.0) * 0.65));
+        float crackRing = smoothstep(0.11, 0.0, rings) * (1.0 - smoothstep(0.72, 1.0, r));
+        float flash = exp(-r * 3.2) * (1.0 - uProgress);
+        float shockRim = smoothstep(0.14, 0.0, abs(r - (0.25 + uProgress * 0.72)));
+
+        float cracks = clamp(crackRadial + crackRing * 0.85, 0.0, 1.0);
+        vec3 col = mix(vec3(0.42, 0.90, 1.0), vec3(1.0, 1.0, 1.0), clamp(cracks + flash + shockRim * 0.7, 0.0, 1.0));
+        float fade = 1.0 - smoothstep(0.35, 1.0, uProgress);
+        float alpha = (cracks * 0.95 + flash * 0.75 + shockRim * 0.85 + 0.12 * (1.0 - r)) * fade;
+        gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending
+  });
+  const crackDisc = new THREE.Mesh(new THREE.CircleGeometry(radius * 0.78, 40), crackMat);
+  group.add(crackDisc);
+
+  // 2. Angular Crystalline Sky-Glass Shards bursting outward along fracture normal
+  const shardGeo = new THREE.OctahedronGeometry(0.28, 0);
+  shardGeo.scale(1.4, 0.42, 0.16);
+  const shardMat = new THREE.MeshBasicMaterial({
+    color: 0xe0f2fe,
+    transparent: true,
+    opacity: 0.9,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+
+  const shards: Array<{ mesh: THREE.Mesh; vel: THREE.Vector3; rotVel: THREE.Vector3 }> = [];
+  const shardCount = 16;
+  for (let i = 0; i < shardCount; i++) {
+    const m = new THREE.Mesh(shardGeo, shardMat);
+    const a = (i / shardCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
+    const radial = 0.25 + Math.random() * (radius * 0.35);
+    m.position.set(Math.cos(a) * radial, Math.sin(a) * radial, (Math.random() - 0.5) * 0.25);
+    const sc = 0.65 + Math.random() * (radius * 0.22);
+    m.scale.set(sc, sc * (0.7 + Math.random() * 0.7), sc);
+    m.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, a);
+    group.add(m);
+    shards.push({
+      mesh: m,
+      vel: new THREE.Vector3(
+        Math.cos(a) * (4.5 + Math.random() * 6.5),
+        Math.sin(a) * (4.5 + Math.random() * 6.5),
+        3.5 + Math.random() * 8.5
+      ),
+      rotVel: new THREE.Vector3(
+        (Math.random() - 0.5) * 9,
+        (Math.random() - 0.5) * 9,
+        (Math.random() - 0.5) * 9
+      )
+    });
+  }
+
+  const update = (dt: number, progress: number) => {
+    crackMat.uniforms.uProgress.value = progress;
+    crackDisc.scale.setScalar(0.55 + progress * 0.85);
+    shardMat.opacity = Math.max(0, (1.0 - progress) * 0.92);
+    for (const s of shards) {
+      s.mesh.position.addScaledVector(s.vel, dt);
+      s.vel.multiplyScalar(Math.max(0, 1 - dt * 2.2));
+      s.mesh.rotation.x += s.rotVel.x * dt;
+      s.mesh.rotation.y += s.rotVel.y * dt;
+      s.mesh.rotation.z += s.rotVel.z * dt;
+    }
+  };
+
+  return { group, update };
+}
+
+const SKY_VEIL_DOMAIN_FRAGMENT_SHADER = /* glsl */ `
+  uniform float uTime;
+  uniform float uAge;
+  varying vec3 vLocalPos;
+
+  ${VOLCANIC_NOISE_GLSL}
+
+  void main() {
+    vec3 dir = normalize(vLocalPos);
+    float h = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+
+    // Inverted liquid-sky canopy with flowing cirrus ribbons and glass-prism fractures
+    float n1 = fbm(dir * 3.6 + vec3(uTime * 0.14, uTime * 0.08, -uTime * 0.12));
+    float n2 = fbm(dir * 7.8 - vec3(uTime * 0.18, -uTime * 0.14, uTime * 0.1));
+    float glassLine = pow(1.0 - abs(n2 * 2.0 - 1.0), 4.5);
+
+    vec3 deepCerulean = vec3(0.05, 0.24, 0.48);
+    vec3 brightSky = vec3(0.32, 0.78, 0.96);
+    vec3 cloudWhite = vec3(0.92, 0.98, 1.0);
+
+    vec3 col = mix(deepCerulean, brightSky, smoothstep(0.12, 0.82, h));
+    col = mix(col, cloudWhite, smoothstep(0.45, 0.82, n1) * 0.65);
+    col += vec3(0.75, 0.95, 1.0) * glassLine * 0.85;
+
+    float appear = smoothstep(0.0, 0.7, uAge);
+    gl_FragColor = vec4(col, 0.82 * appear);
+  }
+`;
+
+/**
+ * Uro Takako's Domain Expansion: Sky Veil Horizon
+ * Luminous inverted-sky mirror dome + cloud-mirror floor + orbiting fractured sky-glass panes.
+ */
+export function createSkyVeilDomainVfx(
+  center: THREE.Vector3,
+  radius: number
+): UnlimitedVoidDomainController {
+  const root = new THREE.Group();
+  root.position.copy(center);
+
+  // 1. Inverted-Sky Crystal Dome
+  const domeMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uAge: { value: 0 }
+    },
+    vertexShader: /* glsl */ `
+      varying vec3 vLocalPos;
+      void main() {
+        vLocalPos = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: SKY_VEIL_DOMAIN_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  });
+  const domeMesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 42, 30), domeMat);
+  root.add(domeMesh);
+
+  // 2. Mirrored Sky-Glass Floor Overlay (grounded cleanly at center.y + 0.06)
+  const floorMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uAge: { value: 0 }
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform float uAge;
+      varying vec2 vUv;
+      ${VOLCANIC_NOISE_GLSL}
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float r = length(p);
+        if (r > 1.0) discard;
+        float n = fbm(vec3(p * 5.2, uTime * 0.28));
+        float ripples = sin(r * 20.0 - uTime * 3.2 + n * 4.5) * 0.5 + 0.5;
+        float cracks = pow(1.0 - abs(n * 2.0 - 1.0), 5.0);
+        vec3 mirrorBlue = vec3(0.14, 0.52, 0.78);
+        vec3 cloudSheen = vec3(0.84, 0.97, 1.0);
+        vec3 col = mix(mirrorBlue, cloudSheen, pow(ripples, 3.0) * 0.45 + cracks * 0.65 + smoothstep(0.75, 1.0, r) * 0.55);
+        float alpha = smoothstep(0.0, 0.55, uAge) * 0.78;
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  });
+  const floorMirror = new THREE.Mesh(new THREE.CircleGeometry(radius * 0.99, 52), floorMat);
+  floorMirror.rotation.x = -Math.PI / 2;
+  floorMirror.position.y = 0.06;
+  root.add(floorMirror);
+
+  // 3. Orbiting Fractured Sky-Glass Panes inside the Perimeter
+  const paneGroup = new THREE.Group();
+  const paneMat = new THREE.MeshBasicMaterial({
+    color: 0xbae6fd,
+    transparent: true,
+    opacity: 0.34,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const paneEdgeMat = new THREE.MeshBasicMaterial({
+    color: 0xf0f9ff,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.55,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  for (let i = 0; i < 16; i++) {
+    const ang = (i / 16) * Math.PI * 2;
+    const dist = radius * (0.76 + (i % 3) * 0.05);
+    const h = 2.6 + (i % 4) * 2.4;
+    const w = 1.6 + (i % 3) * 0.85;
+    const paneGeo = new THREE.PlaneGeometry(w, w * 1.45, 2, 2);
+    const pane = new THREE.Mesh(paneGeo, paneMat);
+    const edge = new THREE.Mesh(paneGeo, paneEdgeMat);
+    pane.add(edge);
+    pane.position.set(Math.cos(ang) * dist, h, Math.sin(ang) * dist);
+    pane.lookAt(0, h * 0.7, 0);
+    pane.rotation.z += (i % 2 === 0 ? 1 : -1) * 0.28;
+    paneGroup.add(pane);
+  }
+  root.add(paneGroup);
+
+  // 4. Drifting Sky-Glass Motes
+  const moteCount = 170;
+  const motePositions = new Float32Array(moteCount * 3);
+  const moteSpeeds = new Float32Array(moteCount);
+  const moteColors = new Float32Array(moteCount * 3);
+  const cSky = new THREE.Color(0x67e8f9);
+  const cWhite = new THREE.Color(0xf8fafc);
+  const tmpC = new THREE.Color();
+
+  for (let i = 0; i < moteCount; i++) {
+    const d = 1.2 + Math.random() * (radius * 0.9);
+    const th = Math.random() * Math.PI * 2;
+    motePositions[i * 3] = Math.cos(th) * d;
+    motePositions[i * 3 + 1] = Math.random() * (radius * 0.72);
+    motePositions[i * 3 + 2] = Math.sin(th) * d;
+    moteSpeeds[i] = 1.1 + Math.random() * 2.2;
+    tmpC.copy(cSky).lerp(cWhite, Math.random() * 0.65);
+    moteColors[i * 3] = tmpC.r;
+    moteColors[i * 3 + 1] = tmpC.g;
+    moteColors[i * 3 + 2] = tmpC.b;
+  }
+
+  const moteGeo = new THREE.BufferGeometry();
+  moteGeo.setAttribute('position', new THREE.BufferAttribute(motePositions, 3));
+  moteGeo.setAttribute('color', new THREE.BufferAttribute(moteColors, 3));
+  const moteMat = new THREE.PointsMaterial({
+    map: getSoftParticleTexture() ?? undefined,
+    size: 0.28,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.0,
+    alphaTest: 0.01,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const motePoints = new THREE.Points(moteGeo, moteMat);
+  root.add(motePoints);
+
+  const maxH = radius * 0.75;
+  const update = (dt: number, elapsed: number, ageSec: number, _cameraPos: THREE.Vector3) => {
+    domeMat.uniforms.uTime.value = elapsed;
+    domeMat.uniforms.uAge.value = ageSec;
+    floorMat.uniforms.uTime.value = elapsed;
+    floorMat.uniforms.uAge.value = ageSec;
+
+    const appear = THREE.MathUtils.smoothstep(ageSec, 0.0, 0.65);
+    moteMat.opacity = appear * 0.85;
+    paneMat.opacity = appear * 0.34;
+    paneEdgeMat.opacity = appear * 0.55;
+    paneGroup.rotation.y += dt * 0.14;
+
+    const pos = moteGeo.attributes.position.array as Float32Array;
+    for (let i = 0; i < moteCount; i++) {
+      const idx = i * 3;
+      pos[idx + 1] += moteSpeeds[i] * dt;
+      pos[idx] += Math.sin(elapsed * 1.5 + i) * 0.3 * dt;
+      pos[idx + 2] += Math.cos(elapsed * 1.3 + i * 1.2) * 0.3 * dt;
+      if (pos[idx + 1] > maxH) {
+        pos[idx + 1] = 0.2;
+      }
+    }
+    moteGeo.attributes.position.needsUpdate = true;
   };
 
   return { root, update };

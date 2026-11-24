@@ -1,15 +1,31 @@
 export type MobaTeam = 'blue' | 'red';
-export type MobaUnitType = 'HERO' | 'MINION' | 'TOWER' | 'CORE';
+export type MobaUnitType = 'HERO' | 'MINION' | 'SHIKIGAMI' | 'TOWER' | 'CORE';
 export type FpsAbilityKey = 'SHIFT' | 'E' | 'Q';
+export type MobaMapId = 'arena' | 'orlando';
 
 export const STANDARD_CE_REGEN_PER_SEC = 4.0;
 export const CE_EXHAUSTION_LOCKOUT_SEC = 10.0;
 
-export type PrimaryFireMode = 'AUTO' | 'BURST' | 'SHOTGUN' | 'MELEE_CLEAVE' | 'HAND_CANNON';
+export type PrimaryFireMode =
+  | 'AUTO'
+  | 'BURST'
+  | 'SHOTGUN'
+  | 'MELEE_CLEAVE'
+  | 'HAND_CANNON'
+  | 'EMBER_INSECTS'
+  | 'HYBRID_SHADOW';
 
 export interface SecondaryFireConfig {
   name: string;
-  kind: 'BARRIER_SHIELD' | 'CHARGED_PUNCH' | 'HELIX_ROCKET' | 'LAPSE_BLUE_ORB';
+  kind:
+    | 'BARRIER_SHIELD'
+    | 'SKY_DEFLECT'
+    | 'CHARGED_PUNCH'
+    | 'HELIX_ROCKET'
+    | 'LAPSE_BLUE_ORB'
+    | 'DIVINE_DOGS'
+    | 'RABBIT_ESCAPE'
+    | 'NONE';
   description: string;
   manaCost?: number;
   manaDrainPerSec?: number;
@@ -29,7 +45,7 @@ export interface SecondaryFireConfig {
 export interface FpsWeaponConfig {
   name: string;
   fireMode: PrimaryFireMode;
-  viewModelType: 'RIFLE' | 'HAMMER' | 'FLAIL' | 'DOOM_GAUNTLET';
+  viewModelType: 'RIFLE' | 'HAMMER' | 'FLAIL' | 'DOOM_GAUNTLET' | 'JOGO_HANDS' | 'MEGUMI_SHADOW' | 'URO_SKY_HANDS';
   damage: number;
   maxDamage?: number; // For chargeable primary fire (Gojo Reversal Red)
   manaCost?: number;
@@ -72,13 +88,21 @@ export type FpsAbilityKind =
   | 'SEISMIC_SLAM'
   | 'RISING_UPPERCUT'
   | 'POWER_BLOCK'
-  | 'METEOR_STRIKE_ULT';
+  | 'METEOR_STRIKE_ULT'
+  | 'FLAME_DASH'
+  | 'MINI_VOLCANO'
+  | 'SHADOW_STEP'
+  | 'NUE_TOAD'
+  | 'RABBIT_ESCAPE_NUE'
+  | 'SKY_PULL'
+  | 'THIN_ICE_BREAKER';
 
 export interface FpsAbilityDef {
   key: FpsAbilityKey;
   name: string;
   description: string;
   cooldownMs: number;
+  maxCharges?: number;
   manaCost: number;
   manaDrainPerSec?: number;
   kind: FpsAbilityKind;
@@ -179,14 +203,30 @@ export interface FpsHudState {
   domainBarrierHp?: number;
   domainBarrierMaxHp?: number;
   canCastHollowPurple?: boolean;
+  canCastMeteor?: boolean;
+  meteorAiming?: boolean;
+  canSummonMahoraga?: boolean;
+  canCastShatteredSky?: boolean;
+  isSkyHovering?: boolean;
+  isShadowStepping?: boolean;
+  shadowStepRemainingSec?: number;
+  canNueCarry?: boolean;
+  nueCarryRemainingSec?: number;
+  nueToadPreview?: 'TOAD' | 'NUE';
+  mahoragaRogue?: boolean;
   blueCoreHp: number;
   blueCoreMaxHp: number;
   redCoreHp: number;
   redCoreMaxHp: number;
   winner: MobaTeam | null;
-  cooldowns: Record<FpsAbilityKey, { remainingMs: number; totalMs: number }>;
+  cooldowns: Record<
+    FpsAbilityKey,
+    { remainingMs: number; totalMs: number; charges?: number; maxCharges?: number }
+  >;
   killFeed: KillFeedEntry[];
   damagePopups: DamagePopup[];
   minimapBlips: MinimapBlip[];
   playerPos: { x: number; z: number; yaw: number };
+  mapId?: MobaMapId;
+  mapName?: string;
 }

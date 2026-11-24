@@ -5,22 +5,35 @@
   import {
     getSelectedFpsHero,
     setSelectedFpsHero,
+    getSelectedFpsMap,
+    setSelectedFpsMap,
+    MOBA_MAPS,
+    type MobaMapId,
     getMouseSensitivity,
     setMouseSensitivity
   } from '$lib/games/fps-moba/storage';
   import type { FpsHeroDef, FpsAbilityKey } from '$lib/games/fps-moba/types';
 
   let selectedHero = $state<FpsHeroDef>(FPS_MOBA_HEROES[0]);
+  let selectedMapId = $state<MobaMapId>('orlando');
   let sensitivity = $state<number>(1.0);
+
+  const currentMap = $derived(MOBA_MAPS.find((m) => m.id === selectedMapId) ?? MOBA_MAPS[0]);
 
   onMount(() => {
     selectedHero = getSelectedFpsHero();
+    selectedMapId = getSelectedFpsMap();
     sensitivity = getMouseSensitivity();
   });
 
   function selectHero(hero: FpsHeroDef) {
     selectedHero = hero;
     setSelectedFpsHero(hero.id);
+  }
+
+  function selectMap(mapId: MobaMapId) {
+    selectedMapId = mapId;
+    setSelectedFpsMap(mapId);
   }
 
   function onSensChange(e: Event) {
@@ -31,6 +44,7 @@
 
   function deploy() {
     setSelectedFpsHero(selectedHero.id);
+    setSelectedFpsMap(selectedMapId);
     goto('/fps-moba/play');
   }
 
@@ -110,7 +124,7 @@
 
     <!-- Right Column: Selected Hero Weapon & Q/E/F/R Kit -->
     <div class="lg:col-span-7 bg-slate-900/60 border border-white/10 rounded-2xl p-6 md:p-8">
-      <div class="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-5 mb-6">
+      <div class="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-5 mb-4">
         <div>
           <span
             class="font-['Share_Tech_Mono'] text-xs uppercase tracking-widest"
@@ -121,13 +135,40 @@
           <h2 class="font-['Cinzel_Decorative'] text-3xl font-bold mt-1">{selectedHero.name}</h2>
         </div>
 
-        <button
-          onclick={deploy}
-          class="px-8 py-4 rounded-xl font-['Share_Tech_Mono'] text-sm font-bold tracking-[0.2em] uppercase text-black transition-transform active:scale-95 shadow-lg cursor-pointer"
-          style="background: {selectedHero.color}; box-shadow: 0 0 30px {selectedHero.color}66;"
-        >
-          DEPLOY TO 3D ARENA →
-        </button>
+        <div class="flex items-center gap-3">
+          <!-- Map Selector Tabs -->
+          <div class="flex items-center bg-black/50 border border-white/10 p-1 rounded-xl">
+            {#each MOBA_MAPS as map}
+              <button
+                onclick={() => selectMap(map.id)}
+                class="px-3.5 py-1.5 rounded-lg font-['Share_Tech_Mono'] text-xs tracking-wider transition-all cursor-pointer {selectedMapId === map.id
+                  ? 'bg-white/15 font-bold shadow'
+                  : 'text-slate-400 hover:text-white'}"
+                style={selectedMapId === map.id ? `color: ${map.accentColor}; border: 1px solid ${map.accentColor}55;` : ''}
+              >
+                {map.name.toUpperCase()}
+              </button>
+            {/each}
+          </div>
+
+          <button
+            onclick={deploy}
+            class="px-7 py-3 rounded-xl font-['Share_Tech_Mono'] text-xs font-bold tracking-[0.2em] uppercase text-black transition-transform active:scale-95 shadow-lg cursor-pointer"
+            style="background: {selectedHero.color}; box-shadow: 0 0 25px {selectedHero.color}66;"
+          >
+            DEPLOY TO {selectedMapId === 'orlando' ? 'ORLANDO' : 'ARENA'} →
+          </button>
+        </div>
+      </div>
+
+      <!-- Active Map Info Banner -->
+      <div class="mb-5 px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-2 font-['Share_Tech_Mono'] text-xs">
+        <div class="flex items-center gap-2.5">
+          <span class="w-2 h-2 rounded-full animate-ping" style="background: {currentMap.accentColor};"></span>
+          <span class="text-white font-bold tracking-wider">MAP: {currentMap.name.toUpperCase()}</span>
+          <span class="text-slate-400 text-[11px]">({currentMap.subtitle})</span>
+        </div>
+        <span class="text-slate-400 text-[11px]">{currentMap.description}</span>
       </div>
 
       <!-- Primary Fire (M1) & Secondary Fire (M2) + Passive -->
@@ -185,7 +226,9 @@
                   [{key}] {key === 'Q' ? 'ULTIMATE' : 'ABILITY'}
                 </span>
                 <span class="font-['Share_Tech_Mono'] text-[11px] text-slate-400">
-                  {(ab.cooldownMs / 1000).toFixed(1)}s CD · {ab.manaCost} MP
+                  {ab.maxCharges && ab.maxCharges > 1
+                    ? `${ab.maxCharges}× · ${(ab.cooldownMs / 1000).toFixed(1)}s`
+                    : `${(ab.cooldownMs / 1000).toFixed(1)}s CD`} · {ab.manaCost} MP
                 </span>
               </div>
               <div class="font-bold text-white text-sm mb-1">{ab.name}</div>

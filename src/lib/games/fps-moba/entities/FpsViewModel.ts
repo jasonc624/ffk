@@ -10,8 +10,10 @@ import {
 import {
   createCursedEnergyOrb,
   createInfinityDistortionMaterial,
+  createSkyVeilDistortionMaterial,
   type CursedOrbController
 } from '../vfx/CursedShaderVfx';
+import { getHandDistanceOffset } from '../storage';
 
 /**
  * FpsViewModel — Renders Overwatch-style First-Person 3D Weapons, Melee Hammers/Flails,
@@ -28,7 +30,15 @@ export class FpsViewModel {
   private coreMesh!: THREE.Mesh;
   private gavelHeadGroup?: THREE.Group;
   private executionerSwordGroup?: THREE.Group;
-  private gojoPovBones: Map<string, { bone: THREE.Bone; restQuat: THREE.Quaternion }> = new Map();
+  private gojoPovGroup?: THREE.Group;
+  private gojoHolder?: THREE.Group;
+  private gojoLeftArmMat?: THREE.Material;
+  private gojoLeftNailMat?: THREE.Material;
+  private gojoMixer?: THREE.AnimationMixer;
+  private gojoIdleAction?: THREE.AnimationAction;
+  private gojoChargeAction?: THREE.AnimationAction;
+  private gojoFireAction?: THREE.AnimationAction;
+  private gojoPurpleAction?: THREE.AnimationAction;
   private gojoRedChargeOrb?: CursedOrbController;
   private gojoBlueChargeOrb?: CursedOrbController;
   private infinityDistortionMat?: THREE.ShaderMaterial;
@@ -49,6 +59,7 @@ export class FpsViewModel {
   private walkTime = 0;
   private swayX = 0;
   private swayY = 0;
+  private handDistanceOffset = getHandDistanceOffset();
 
   constructor(camera: THREE.PerspectiveCamera, hero: FpsHeroDef) {
     this.hero = hero;
@@ -100,6 +111,12 @@ export class FpsViewModel {
     const vmType = hero.weapon.viewModelType;
     if (hero.id === 'gojo') {
       this.buildGojoPovViewModel(darkMetalMat, glowMat);
+    } else if (vmType === 'JOGO_HANDS') {
+      this.buildJogoHandsViewModel();
+    } else if (vmType === 'MEGUMI_SHADOW') {
+      this.buildMegumiShadowViewModel();
+    } else if (vmType === 'URO_SKY_HANDS') {
+      this.buildUroSkyHandsViewModel();
     } else if (vmType === 'HAMMER') {
       this.buildHammerViewModel(darkMetalMat, trimMat, glowMat, accentMat);
     } else if (vmType === 'FLAIL') {
@@ -331,97 +348,478 @@ export class FpsViewModel {
     this.leftHandGroup.add(bracerMesh, leftOrb);
   }
 
-  private buildGojoPovViewModel(darkMat: THREE.Material, glowMat: THREE.Material) {
-    const bracerMesh = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.09, 0.34), darkMat);
-    bracerMesh.rotation.set(0.12, -0.18, 0);
-    const leftOrb = new THREE.Mesh(new THREE.IcosahedronGeometry(0.06, 1), glowMat);
-    leftOrb.position.set(0.04, 0.11, -0.14);
-    this.leftHandGroup.add(bracerMesh, leftOrb);
+  private buildJogoHandsViewModel() {
+    const ashSkinMat = new THREE.MeshToonMaterial({
+      color: 0x5c534c,
+      emissive: 0x451205,
+      emissiveIntensity: 0.25,
+      gradientMap: getAnimeToonGradient()
+    });
+    const sleeveMat = new THREE.MeshToonMaterial({
+      color: 0x241d18,
+      gradientMap: getAnimeToonGradient()
+    });
+    const lavaVeinMat = new THREE.MeshBasicMaterial({
+      color: 0xff4500
+    });
+    const emberCoreMat = new THREE.MeshBasicMaterial({
+      color: 0xfacc15
+    });
 
-    // Pre-create fallback charge orbs in case GLB load is pending or in fallback
+    const handRoot = new THREE.Group();
+    handRoot.position.set(0.02, -0.02, 0.08);
+    handRoot.rotation.set(0.18, 0.28, 0.22);
+
+    const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.068, 0.082, 0.24, 14), sleeveMat);
+    sleeve.rotation.x = Math.PI * 0.5;
+    sleeve.position.set(0.02, -0.04, 0.2);
+    handRoot.add(sleeve);
+
+    const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.046, 0.06, 0.22, 14), ashSkinMat);
+    forearm.rotation.x = Math.PI * 0.5;
+    forearm.position.set(0, -0.02, 0.04);
+    handRoot.add(forearm);
+
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.04, 0.11), ashSkinMat);
+    palm.position.set(0, 0.0, -0.09);
+    handRoot.add(palm);
+
+    const wristVein = new THREE.Mesh(new THREE.TorusGeometry(0.052, 0.008, 8, 16), lavaVeinMat);
+    wristVein.position.set(0, -0.015, -0.02);
+    handRoot.add(wristVein);
+
+    const fingerOffsets = [-0.036, -0.012, 0.012, 0.036];
+    for (let i = 0; i < fingerOffsets.length; i++) {
+      const fx = fingerOffsets[i];
+      const finger = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.012, 0.09, 8), ashSkinMat);
+      finger.rotation.x = Math.PI * 0.42;
+      finger.position.set(fx, 0.012, -0.175);
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.009, 0.036, 8), lavaVeinMat);
+      tip.rotation.x = -Math.PI * 0.58;
+      tip.position.set(fx, 0.026, -0.225);
+      handRoot.add(finger, tip);
+    }
+
+    const thumb = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.013, 0.075, 8), ashSkinMat);
+    thumb.rotation.set(Math.PI * 0.44, 0, -0.55);
+    thumb.position.set(-0.062, 0.01, -0.115);
+    handRoot.add(thumb);
+
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.038, 0), emberCoreMat);
+    core.position.set(-0.01, 0.075, -0.14);
+    const auraRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.058, 0.006, 8, 20),
+      new THREE.MeshBasicMaterial({
+        color: 0xff4500,
+        transparent: true,
+        opacity: 0.78,
+        blending: THREE.AdditiveBlending
+      })
+    );
+    auraRing.rotation.x = Math.PI * 0.35;
+    core.add(auraRing);
+    handRoot.add(core);
+    this.coreMesh = core;
+
+    this.rightWeaponGroup.add(handRoot);
+
+    const leftForearm = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.064, 0.28, 12), sleeveMat);
+    leftForearm.rotation.x = Math.PI * 0.5;
+    leftForearm.position.set(0, 0, 0.14);
+    const leftFist = new THREE.Mesh(new THREE.DodecahedronGeometry(0.068, 0), ashSkinMat);
+    leftFist.position.set(0, 0.01, -0.05);
+    this.leftHandGroup.add(leftForearm, leftFist);
+    this.leftHandGroup.position.set(-0.32, -0.32, -0.4);
+  }
+
+  private buildMegumiShadowViewModel() {
+    const sleeveMat = new THREE.MeshToonMaterial({
+      color: 0x0f172a,
+      gradientMap: getAnimeToonGradient()
+    });
+    const skinMat = new THREE.MeshToonMaterial({
+      color: 0xf6d5c0,
+      gradientMap: getAnimeToonGradient()
+    });
+    const bladeMat = new THREE.MeshStandardMaterial({
+      color: 0x111827,
+      emissive: 0x312e81,
+      emissiveIntensity: 0.65,
+      metalness: 0.85,
+      roughness: 0.22
+    });
+    const edgeMat = new THREE.MeshBasicMaterial({
+      color: 0x818cf8
+    });
+
+    const swordRoot = new THREE.Group();
+    swordRoot.position.set(0.05, -0.05, 0.05);
+    swordRoot.rotation.set(0.18, 0.22, 0.16);
+
+    // Navy Jujutsu High sleeve & hand gripping hilt
+    const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.068, 0.24, 12), sleeveMat);
+    sleeve.rotation.x = Math.PI * 0.5;
+    sleeve.position.set(0.04, -0.1, 0.16);
+    const gripHand = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.06, 0.09), skinMat);
+    gripHand.position.set(0.01, -0.04, 0.02);
+
+    // Cursed-Tool Broadsword hilt, guard, and wide dark-steel blade
+    const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.026, 0.24, 10), sleeveMat);
+    hilt.position.set(0, -0.05, 0);
+    const guard = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.032, 0.06), edgeMat);
+    guard.position.set(0, 0.06, -0.02);
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.098, 0.78, 0.024), bladeMat);
+    blade.position.set(0, 0.46, -0.03);
+    const bladeTip = new THREE.Mesh(new THREE.ConeGeometry(0.068, 0.16, 4), bladeMat);
+    bladeTip.rotation.y = Math.PI * 0.25;
+    bladeTip.position.set(0, 0.92, -0.03);
+    const shadowEdge = new THREE.Mesh(
+      new THREE.BoxGeometry(0.114, 0.78, 0.01),
+      new THREE.MeshBasicMaterial({
+        color: 0x6366f1,
+        transparent: true,
+        opacity: 0.55,
+        blending: THREE.AdditiveBlending
+      })
+    );
+    shadowEdge.position.set(0, 0.46, -0.03);
+
+    // Subtle cursed shadow seal floating near the guard
+    const seal = new THREE.Mesh(new THREE.OctahedronGeometry(0.026, 0), edgeMat);
+    seal.position.set(0, 0.06, -0.06);
+    this.coreMesh = seal;
+
+    swordRoot.add(sleeve, gripHand, hilt, guard, blade, bladeTip, shadowEdge, seal);
+    this.rightWeaponGroup.add(swordRoot);
+
+    // Left quick-melee / shadow sign hand
+    const leftForearm = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.06, 0.28, 12), sleeveMat);
+    leftForearm.rotation.x = Math.PI * 0.5;
+    leftForearm.position.set(0, 0, 0.14);
+    const leftFist = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.06, 0.095), skinMat);
+    leftFist.position.set(0, 0.01, -0.05);
+    this.leftHandGroup.add(leftForearm, leftFist);
+    this.leftHandGroup.position.set(-0.32, -0.32, -0.4);
+  }
+
+  private buildUroSkyHandsViewModel() {
+    const skinMat = new THREE.MeshStandardMaterial({
+      color: 0xf7dcd0,
+      roughness: 0.56,
+      metalness: 0.03
+    });
+    const skyGlassMat = new THREE.MeshBasicMaterial({
+      color: 0x67e8f9,
+      transparent: true,
+      opacity: 0.52,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const skyRimMat = new THREE.MeshBasicMaterial({
+      color: 0xf0f9ff,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.65,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+
+    // Right open-palm Sky Manipulation hand
+    const handRoot = new THREE.Group();
+    handRoot.position.set(0.0, 0.02, -0.04);
+
+    const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.038, 0.048, 0.34, 14), skinMat);
+    forearm.rotation.x = Math.PI * 0.46;
+    forearm.position.set(0.04, -0.06, 0.16);
+    handRoot.add(forearm);
+
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.032, 0.105), skinMat);
+    palm.position.set(0.02, 0.01, -0.04);
+    palm.rotation.set(0.28, -0.22, 0.35);
+    handRoot.add(palm);
+
+    // Articulated splayed fingers catching the fabric of the sky
+    const fingerOffsets = [
+      [-0.032, 0.015, -0.105, -0.22],
+      [-0.011, 0.024, -0.118, -0.07],
+      [0.012, 0.025, -0.120, 0.06],
+      [0.033, 0.018, -0.108, 0.19]
+    ];
+    for (const [fx, fy, fz, spreadY] of fingerOffsets) {
+      const f = new THREE.Mesh(new THREE.CylinderGeometry(0.0085, 0.0105, 0.088, 8), skinMat);
+      f.rotation.x = Math.PI * 0.42;
+      f.rotation.z = spreadY;
+      f.position.set(0.02 + fx, fy, fz);
+      handRoot.add(f);
+    }
+    const thumb = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.012, 0.07, 8), skinMat);
+    thumb.position.set(-0.035, 0.004, -0.052);
+    thumb.rotation.set(0.55, 0.35, 0.95);
+    handRoot.add(thumb);
+
+    // Translucent warped-sky cuff & floating crystalline spatial distortion prism above palm
+    const wristVeil = new THREE.Mesh(new THREE.TorusGeometry(0.062, 0.012, 8, 22), skyGlassMat);
+    wristVeil.position.set(0.032, -0.022, 0.04);
+    wristVeil.rotation.set(Math.PI * 0.48, 0.12, 0.25);
+    handRoot.add(wristVeil);
+
+    const skyOrb = new THREE.Mesh(new THREE.OctahedronGeometry(0.052, 0), skyRimMat);
+    skyOrb.position.set(-0.02, 0.085, -0.11);
+    const skyHalo = new THREE.Mesh(new THREE.TorusGeometry(0.088, 0.008, 8, 24), skyGlassMat);
+    skyHalo.rotation.x = Math.PI * 0.38;
+    skyOrb.add(skyHalo);
+    handRoot.add(skyOrb);
+    this.coreMesh = skyOrb;
+
+    this.rightWeaponGroup.add(handRoot);
+
+    // Left quick-melee / sky-grab hand
+    const leftForearm = new THREE.Mesh(new THREE.CylinderGeometry(0.038, 0.048, 0.3, 12), skinMat);
+    leftForearm.rotation.x = Math.PI * 0.5;
+    leftForearm.position.set(0, 0, 0.14);
+    const leftPalm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.034, 0.1), skinMat);
+    leftPalm.position.set(0, 0.01, -0.05);
+    const leftRing = new THREE.Mesh(new THREE.TorusGeometry(0.065, 0.01, 8, 20), skyGlassMat);
+    leftRing.position.set(0, 0.01, -0.06);
+    this.leftHandGroup.add(leftForearm, leftPalm, leftRing);
+    this.leftHandGroup.position.set(-0.32, -0.32, -0.4);
+  }
+
+  private buildGojoPovViewModel(darkMat: THREE.Material, glowMat: THREE.Material) {
+    this.rightWeaponGroup.visible = false;
+    this.leftHandGroup.visible = false;
+
+    this.gojoPovGroup = new THREE.Group();
+    this.root.add(this.gojoPovGroup);
+
+    // Pre-create fallback charge orbs in case GLB load is pending
     const fallbackRedOrb = createCursedEnergyOrb({
       variant: 'RED',
-      radius: 0.052,
-      withLight: false
+      radius: 0.025,
+      withLight: false,
+      isViewModel: true
     });
-    fallbackRedOrb.group.position.set(0, 0.08, -0.22);
+    fallbackRedOrb.group.position.set(0.18, -0.13, -0.43);
     fallbackRedOrb.group.visible = false;
-    this.rightWeaponGroup.add(fallbackRedOrb.group);
+    this.gojoPovGroup.add(fallbackRedOrb.group);
     this.gojoRedChargeOrb = fallbackRedOrb;
 
     const fallbackBlueOrb = createCursedEnergyOrb({
       variant: 'BLUE',
-      radius: 0.056,
-      withLight: false
+      radius: 0.026,
+      withLight: false,
+      isViewModel: true
     });
-    fallbackBlueOrb.group.position.set(0, 0.08, -0.22);
+    fallbackBlueOrb.group.position.set(0.18, -0.13, -0.43);
     fallbackBlueOrb.group.visible = false;
-    this.rightWeaponGroup.add(fallbackBlueOrb.group);
+    this.gojoPovGroup.add(fallbackBlueOrb.group);
     this.gojoBlueChargeOrb = fallbackBlueOrb;
 
     if (typeof window === 'undefined') return;
-    void loadCachedGlb('/models/gojo_pov_finger.glb')
+    const toonGrad = getAnimeToonGradient();
+    void loadCachedGlb('/models/gojo_pov.glb')
       .then((gltf) => {
         const handScene = cloneSkeleton(gltf.scene) as THREE.Group;
-        const toonGrad = getAnimeToonGradient();
-        applyAnimeToonToScene(handScene, toonGrad);
-        // Keep POV hand below the HDR bloom threshold so the hand/weapon stays crisp and never glows
+
+        // Apply authentic Gojo Jujutsu High uniform (black sleeves) and calibrated anime skin tone
+        // Separate Left and Right arm groups so Left arm is hidden by default (Genji single-hand stance)
+        // and only becomes visible during Hollow Purple
         handScene.traverse((obj) => {
-          if ((obj as THREE.Mesh).isMesh) {
-            const mat = (obj as THREE.Mesh).material as THREE.MeshToonMaterial;
-            if (mat && 'emissiveIntensity' in mat) {
-              mat.emissiveIntensity = 0;
-              mat.color.setHex(0xdbe2ec);
+          if ((obj as THREE.SkinnedMesh).isSkinnedMesh) {
+            const sm = obj as THREE.SkinnedMesh;
+            const geom = sm.geometry;
+            const skinIndex = geom.attributes.skinIndex;
+            const skinWeight = geom.attributes.skinWeight;
+            const skeleton = sm.skeleton;
+
+            if (!geom.index || !skinIndex || !skinWeight || !skeleton) return;
+
+            const isLeftVertex = (i: number) => {
+              let lW = 0;
+              for (let k = 0; k < 4; k++) {
+                const jIdx = skinIndex.getComponent(i, k);
+                const w = skinWeight.getComponent(i, k);
+                const bName = skeleton.bones[jIdx]?.name || '';
+                if (bName.includes('L_') || bName.includes('L001') || bName.includes('L.')) lW += w;
+              }
+              return lW > 0.5;
+            };
+
+            const oldIndices = Array.from(geom.index.array);
+            const rightIndices: number[] = [];
+            const leftIndices: number[] = [];
+            for (let i = 0; i < oldIndices.length; i += 3) {
+              if (isLeftVertex(oldIndices[i])) {
+                leftIndices.push(oldIndices[i], oldIndices[i + 1], oldIndices[i + 2]);
+              } else {
+                rightIndices.push(oldIndices[i], oldIndices[i + 1], oldIndices[i + 2]);
+              }
             }
-          }
-        });
 
-        handScene.traverse((obj) => {
-          if ((obj as THREE.Bone).isBone) {
-            const bone = obj as THREE.Bone;
-            this.gojoPovBones.set(bone.name, {
-              bone,
-              restQuat: bone.quaternion.clone()
+            const newIndices = new Uint16Array([...rightIndices, ...leftIndices]);
+            geom.setIndex(new THREE.BufferAttribute(newIndices, 1));
+            geom.clearGroups();
+            geom.addGroup(0, rightIndices.length, 0); // Group 0 = Right arm
+            geom.addGroup(rightIndices.length, leftIndices.length, 1); // Group 1 = Left arm
+
+            // Use proper sRGB-to-Linear colors via THREE.Color so skin & nails look warm and healthy (never pale zombie grey or dark brown nails)
+            const sleeveCol = new THREE.Color(0x161824);
+            const skinCol = new THREE.Color(0xd89878).multiplyScalar(0.42);
+            const nailCol = new THREE.Color(0xe6b5a0).multiplyScalar(0.46);
+
+            // Fingernails mesh
+            if (geom.attributes.position.count < 1000) {
+              const rightNailMat = new THREE.MeshToonMaterial({
+                color: nailCol,
+                gradientMap: toonGrad,
+                toneMapped: true
+              });
+              const leftNailMat = new THREE.MeshToonMaterial({
+                color: nailCol,
+                gradientMap: toonGrad,
+                toneMapped: true,
+                visible: false // Hidden by default (Genji single-hand stance)
+              });
+              sm.material = [rightNailMat, leftNailMat];
+              this.gojoLeftNailMat = leftNailMat;
+              return;
+            }
+
+            // Arm/Hand mesh: assign black sleeve to upper arm & forearm, warm anime peach skin to hands/fingers
+            const count = geom.attributes.position.count;
+            const colors = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+              let armW = 0;
+              for (let k = 0; k < 4; k++) {
+                const jIdx = skinIndex.getComponent(i, k);
+                const w = skinWeight.getComponent(i, k);
+                const bName = skeleton.bones[jIdx]?.name || '';
+                if (
+                  bName.includes('forearm') ||
+                  bName.includes('upper_arm') ||
+                  bName.includes('deltoid') ||
+                  bName.includes('clavicle')
+                ) {
+                  if (!bName.includes('001')) armW += w;
+                }
+              }
+
+              if (armW > 0.35) {
+                // Jujutsu High uniform black sleeve (deep matte fabric)
+                colors[i * 3] = sleeveCol.r;
+                colors[i * 3 + 1] = sleeveCol.g;
+                colors[i * 3 + 2] = sleeveCol.b;
+              } else {
+                // Gojo warm anime peach skin tone (linear space, calibrated below HDR bloom threshold)
+                colors[i * 3] = skinCol.r;
+                colors[i * 3 + 1] = skinCol.g;
+                colors[i * 3 + 2] = skinCol.b;
+              }
+            }
+
+            geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            const rightBodyMat = new THREE.MeshToonMaterial({
+              vertexColors: true,
+              gradientMap: toonGrad,
+              toneMapped: true
             });
+            const leftBodyMat = new THREE.MeshToonMaterial({
+              vertexColors: true,
+              gradientMap: toonGrad,
+              toneMapped: true,
+              visible: false // Hidden by default (Genji single-hand stance)
+            });
+            sm.material = [rightBodyMat, leftBodyMat];
+            this.gojoLeftArmMat = leftBodyMat;
           }
         });
 
-        // gojo_pov_finger.glb forearm->index runs +X -> -X; yaw toward crosshair + 15° left with native +Y up so thumb stays below index
-        const holder = new THREE.Group();
-        holder.position.set(0.02, -0.22, 0.22);
-        holder.rotation.set(0.06, -Math.PI * 0.43 + THREE.MathUtils.degToRad(15), 0.04);
-        holder.scale.setScalar(0.82);
-        holder.add(handScene);
-        this.rightWeaponGroup.add(holder);
+        // Setup Animation Mixer & Actions
+        this.gojoMixer = new THREE.AnimationMixer(handScene);
+        const idleClip = gltf.animations.find((a) => a.name === 'Idle');
+        const chargeClip = gltf.animations.find((a) => a.name === 'FingerGun_Charge');
+        const fireClip = gltf.animations.find((a) => a.name === 'FingerGun_Fire');
+        const purpleClip = gltf.animations.find((a) => a.name === 'Hollow_Purple');
 
-        // Remove fallback orbs if we have a rigged index fingertip bone
-        const indexTip = this.gojoPovBones.get('Index3')?.bone;
-        if (indexTip) {
-          this.rightWeaponGroup.remove(fallbackRedOrb.group);
-          this.rightWeaponGroup.remove(fallbackBlueOrb.group);
+        if (idleClip) {
+          const action = this.gojoMixer.clipAction(idleClip);
+          action.setLoop(THREE.LoopRepeat, Infinity);
+          action.play();
+          this.gojoIdleAction = action;
+        }
+
+        if (chargeClip) {
+          const action = this.gojoMixer.clipAction(chargeClip);
+          action.setLoop(THREE.LoopOnce, 0);
+          action.clampWhenFinished = true;
+          this.gojoChargeAction = action;
+        }
+
+        if (fireClip) {
+          const action = this.gojoMixer.clipAction(fireClip);
+          action.setLoop(THREE.LoopOnce, 1);
+          action.clampWhenFinished = true;
+          this.gojoFireAction = action;
+        }
+
+        if (purpleClip) {
+          const action = this.gojoMixer.clipAction(purpleClip);
+          action.setLoop(THREE.LoopOnce, 1);
+          action.clampWhenFinished = true;
+          this.gojoPurpleAction = action;
+        }
+
+        // Genji single-hand FPS positioning: enters from far bottom-right and slants up-left straight toward crosshair
+        const holder = new THREE.Group();
+        holder.scale.setScalar(0.0125);
+        holder.rotation.order = 'YXZ';
+        holder.rotation.set(
+          THREE.MathUtils.degToRad(-52),
+          Math.PI + THREE.MathUtils.degToRad(45),
+          THREE.MathUtils.degToRad(-12)
+        );
+        holder.position.set(-0.401, -0.885, -0.627);
+        holder.add(handScene);
+        this.gojoPovGroup?.add(holder);
+        this.gojoHolder = holder;
+
+        // Attach BOTH Red and Blue Cursed Energy Orbs to the Right Index Fingertip (single-hand caster)
+        const rightIndexTip =
+          (handScene.getObjectByName('f_index03R_end_057') as THREE.Bone | undefined) ||
+          (handScene.getObjectByName('f_index03R_029') as THREE.Bone | undefined);
+
+        if (rightIndexTip && this.gojoPovGroup) {
+          this.gojoPovGroup.remove(fallbackRedOrb.group);
+          this.gojoPovGroup.remove(fallbackBlueOrb.group);
 
           const redOrbCtrl = createCursedEnergyOrb({
             variant: 'RED',
-            radius: 0.052,
-            withLight: false
+            radius: 0.018,
+            withLight: false,
+            isViewModel: true
           });
           redOrbCtrl.group.visible = false;
-          redOrbCtrl.group.position.set(-0.04, 0.05, 0);
-          indexTip.add(redOrbCtrl.group);
+          // Pure +Y along the index fingertip bone axis so the orb sits cleanly past the very tip of the finger
+          redOrbCtrl.group.position.set(0, 0.042, 0);
+          rightIndexTip.add(redOrbCtrl.group);
           this.gojoRedChargeOrb = redOrbCtrl;
 
           const blueOrbCtrl = createCursedEnergyOrb({
             variant: 'BLUE',
-            radius: 0.056,
-            withLight: false
+            radius: 0.019,
+            withLight: false,
+            isViewModel: true
           });
           blueOrbCtrl.group.visible = false;
-          blueOrbCtrl.group.position.set(-0.04, 0.05, 0);
-          indexTip.add(blueOrbCtrl.group);
+          blueOrbCtrl.group.position.set(0, 0.042, 0);
+          rightIndexTip.add(blueOrbCtrl.group);
           this.gojoBlueChargeOrb = blueOrbCtrl;
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn('Failed to load gojo_pov.glb:', err);
+      });
   }
 
   private buildBarrierShieldOverlay() {
@@ -453,6 +851,12 @@ export class FpsViewModel {
       const lensGeo = new THREE.PlaneGeometry(4, 3, 32, 24);
       const lensMesh = new THREE.Mesh(lensGeo, this.infinityDistortionMat);
       this.barrierShieldGroup.add(lensMesh);
+    } else if (this.hero.secondaryFire.kind === 'SKY_DEFLECT') {
+      // Uro Takako Sky Veil Deflect: translucent grabbed sky-cloth rippling in front of her
+      this.infinityDistortionMat = createSkyVeilDistortionMaterial();
+      const veilGeo = new THREE.PlaneGeometry(3.2, 2.2, 32, 24);
+      const veilMesh = new THREE.Mesh(veilGeo, this.infinityDistortionMat);
+      this.barrierShieldGroup.add(veilMesh);
     } else {
       const plane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), this.barrierShieldMat);
       const gridPlane = new THREE.Mesh(new THREE.PlaneGeometry(w, h, 8, 6), this.barrierBorderMat);
@@ -461,6 +865,8 @@ export class FpsViewModel {
     }
     if (this.hero.id === 'gojo') {
       this.barrierShieldGroup.position.set(0, 0.05, -2.4 - 0.8);
+    } else if (this.hero.secondaryFire.kind === 'SKY_DEFLECT') {
+      this.barrierShieldGroup.position.set(0, 0.02, -1.65);
     } else {
       this.barrierShieldGroup.position.set(0, 0, -0.82);
     }
@@ -472,7 +878,29 @@ export class FpsViewModel {
     this.swayY = THREE.MathUtils.clamp(this.swayY + dy * 0.00018, -0.04, 0.04);
   }
 
+  public setHandDistanceOffset(offsetMeters: number) {
+    this.handDistanceOffset = THREE.MathUtils.clamp(offsetMeters, -0.16, 0.35);
+    if (this.gojoPovGroup) {
+      this.gojoPovGroup.position.z = -this.handDistanceOffset;
+    }
+  }
+
+  public triggerMeleeSlash() {
+    this.swingProgress = 1.0;
+    this.swingDir *= -1;
+    this.muzzleLight.intensity = 4.2;
+  }
+
   public triggerFireRecoil() {
+    if (this.hero.id === 'gojo' && this.gojoFireAction) {
+      if (this.gojoIdleAction) this.gojoIdleAction.stop();
+      if (this.gojoChargeAction) this.gojoChargeAction.stop();
+      this.gojoFireAction.reset().play();
+      this.recoilOffset = 0.08;
+      this.muzzleLight.intensity = 5.0;
+      return;
+    }
+
     if (this.hero.weapon.fireMode === 'MELEE_CLEAVE') {
       this.swingProgress = 1.0;
       this.swingDir *= -1;
@@ -486,6 +914,16 @@ export class FpsViewModel {
       this.recoilOffset = 0.11;
       this.muzzleLight.intensity = 6.0;
     }
+  }
+
+  public triggerHollowPurple() {
+    if (this.gojoPurpleAction) {
+      if (this.gojoIdleAction) this.gojoIdleAction.stop();
+      if (this.gojoChargeAction) this.gojoChargeAction.stop();
+      if (this.gojoFireAction) this.gojoFireAction.stop();
+      this.gojoPurpleAction.reset().play();
+    }
+    this.castAnimProgress = 1.0;
   }
 
   public triggerRocketPunchLunge() {
@@ -528,8 +966,12 @@ export class FpsViewModel {
       this.shieldDeployRatio = THREE.MathUtils.lerp(this.shieldDeployRatio, 1.0, 0.25);
       this.barrierShieldGroup.visible = true;
       if (this.infinityDistortionMat) {
-        this.infinityDistortionMat.uniforms.uDeployRatio.value = this.shieldDeployRatio;
-        this.infinityDistortionMat.uniforms.uPoolRatio.value = opts.barrierHpRatio;
+        if (this.infinityDistortionMat.uniforms.uDeployRatio) {
+          this.infinityDistortionMat.uniforms.uDeployRatio.value = this.shieldDeployRatio;
+        }
+        if (this.infinityDistortionMat.uniforms.uPoolRatio) {
+          this.infinityDistortionMat.uniforms.uPoolRatio.value = opts.barrierHpRatio;
+        }
       } else {
         this.barrierShieldMat.opacity = 0.18 * this.shieldDeployRatio;
         this.barrierBorderMat.opacity = (0.35 + (1 - opts.barrierHpRatio) * 0.35) * this.shieldDeployRatio;
@@ -540,7 +982,9 @@ export class FpsViewModel {
       if (this.shieldDeployRatio < 0.02) {
         this.barrierShieldGroup.visible = false;
       } else if (this.infinityDistortionMat) {
-        this.infinityDistortionMat.uniforms.uDeployRatio.value = this.shieldDeployRatio;
+        if (this.infinityDistortionMat.uniforms.uDeployRatio) {
+          this.infinityDistortionMat.uniforms.uDeployRatio.value = this.shieldDeployRatio;
+        }
       } else {
         this.barrierShieldMat.opacity = 0.18 * this.shieldDeployRatio;
         this.barrierBorderMat.opacity = 0.35 * this.shieldDeployRatio;
@@ -587,7 +1031,7 @@ export class FpsViewModel {
     this.rightWeaponGroup.position.set(
       0.34 + bobX + this.swayX + swingArcX + chargeShake,
       -0.28 + bobY + this.swayY - this.recoilOffset * 0.15 + chargeShake,
-      -0.58 + this.recoilOffset + chargePullZ + lungeZ
+      -0.58 + this.recoilOffset + chargePullZ + lungeZ - this.handDistanceOffset
     );
     this.rightWeaponGroup.rotation.set(
       this.recoilOffset * 0.9 + reloadPitch + swingPitch,
@@ -600,34 +1044,96 @@ export class FpsViewModel {
       this.coreMesh.rotation.y = elapsed * (5.0 + this.punchChargeRatio * 12);
     }
 
-    if (this.gojoPovBones.size > 0) {
-      const breath = Math.sin(elapsed * 2.4);
-      const firePulse = this.recoilOffset * 3.5 + Math.sin(this.castAnimProgress * Math.PI) * 0.45;
-      const eul = new THREE.Euler();
-      const qDelta = new THREE.Quaternion();
-      const poseFinger = (name: string, rx: number, ry = 0, rz = 0) => {
-        const rec = this.gojoPovBones.get(name);
-        if (!rec) return;
-        eul.set(rx, ry, rz, 'XYZ');
-        qDelta.setFromEuler(eul);
-        rec.bone.quaternion.copy(rec.restQuat).multiply(qDelta);
-      };
+    if (this.infinityDistortionMat) {
+      this.infinityDistortionMat.uniforms.uTime.value = elapsed;
+    }
 
-      // Subtle finger-gun idle sway + thumb-hammer kick on shot, keeping Middle/Ring/Pinky curled in their finger-gun pose
-      poseFinger('Hand_1', breath * 0.02, 0, -firePulse * 0.16);
-      poseFinger('Index1', breath * 0.015, 0, -firePulse * 0.08);
-      poseFinger('Thumb1', 0, 0, breath * 0.025 + firePulse * 0.28);
-
-      if (this.infinityDistortionMat) {
-        this.infinityDistortionMat.uniforms.uTime.value = elapsed;
-      }
+    if (this.gojoMixer) {
+      this.gojoMixer.update(dt);
     }
 
     if (this.hero.id === 'gojo') {
+      const isPurplePlaying = Boolean(this.gojoPurpleAction?.isRunning());
+      const isFirePlaying = Boolean(this.gojoFireAction?.isRunning());
+
+      // Genji single-hand stance: left arm is hidden during normal movement/firing,
+      // and only becomes visible when casting the 2-handed Hollow Purple technique
+      if (this.gojoLeftArmMat) this.gojoLeftArmMat.visible = isPurplePlaying;
+      if (this.gojoLeftNailMat) this.gojoLeftNailMat.visible = isPurplePlaying;
+
+      if (this.gojoHolder) {
+        // Smoothly interpolate between Genji single-hand diagonal slant and centered 2-hand Hollow Purple pose (both in YXZ order)
+        const lerpRate = Math.min(1, dt * 10);
+        if (isPurplePlaying) {
+          this.gojoHolder.position.x = THREE.MathUtils.lerp(this.gojoHolder.position.x, 0.0, lerpRate);
+          this.gojoHolder.position.y = THREE.MathUtils.lerp(this.gojoHolder.position.y, -0.74, lerpRate);
+          this.gojoHolder.position.z = THREE.MathUtils.lerp(this.gojoHolder.position.z, -0.76, lerpRate);
+          this.gojoHolder.scale.x = THREE.MathUtils.lerp(this.gojoHolder.scale.x, 0.0082, lerpRate);
+          this.gojoHolder.scale.y = THREE.MathUtils.lerp(this.gojoHolder.scale.y, 0.009, lerpRate);
+          this.gojoHolder.scale.z = THREE.MathUtils.lerp(this.gojoHolder.scale.z, 0.009, lerpRate);
+          this.gojoHolder.rotation.x = THREE.MathUtils.lerp(this.gojoHolder.rotation.x, THREE.MathUtils.degToRad(-48), lerpRate);
+          this.gojoHolder.rotation.y = THREE.MathUtils.lerp(this.gojoHolder.rotation.y, Math.PI, lerpRate);
+          this.gojoHolder.rotation.z = THREE.MathUtils.lerp(this.gojoHolder.rotation.z, 0, lerpRate);
+        } else {
+          this.gojoHolder.position.x = THREE.MathUtils.lerp(this.gojoHolder.position.x, -0.401, lerpRate);
+          this.gojoHolder.position.y = THREE.MathUtils.lerp(this.gojoHolder.position.y, -0.885, lerpRate);
+          this.gojoHolder.position.z = THREE.MathUtils.lerp(this.gojoHolder.position.z, -0.627, lerpRate);
+          this.gojoHolder.scale.x = THREE.MathUtils.lerp(this.gojoHolder.scale.x, 0.0125, lerpRate);
+          this.gojoHolder.scale.y = THREE.MathUtils.lerp(this.gojoHolder.scale.y, 0.0125, lerpRate);
+          this.gojoHolder.scale.z = THREE.MathUtils.lerp(this.gojoHolder.scale.z, 0.0125, lerpRate);
+          this.gojoHolder.rotation.x = THREE.MathUtils.lerp(this.gojoHolder.rotation.x, THREE.MathUtils.degToRad(-52), lerpRate);
+          this.gojoHolder.rotation.y = THREE.MathUtils.lerp(
+            this.gojoHolder.rotation.y,
+            Math.PI + THREE.MathUtils.degToRad(45),
+            lerpRate
+          );
+          this.gojoHolder.rotation.z = THREE.MathUtils.lerp(this.gojoHolder.rotation.z, THREE.MathUtils.degToRad(-12), lerpRate);
+        }
+      }
+
+      const activeChargeRatio = Math.max(this.primaryChargeRatio, this.blueChargeRatio);
+
+      if (!isPurplePlaying && !isFirePlaying) {
+        // Release finished clamped one-shot clips so they don't fight with Idle or Charge
+        if (this.gojoFireAction?.enabled) this.gojoFireAction.stop();
+        if (this.gojoPurpleAction?.enabled) this.gojoPurpleAction.stop();
+
+        if (activeChargeRatio > 0.01 && this.gojoChargeAction) {
+          if (this.gojoIdleAction?.isRunning()) this.gojoIdleAction.stop();
+          if (!this.gojoChargeAction.enabled) {
+            this.gojoChargeAction.reset().play();
+            this.gojoChargeAction.paused = true;
+          }
+          this.gojoChargeAction.time = Math.min(0.99, Math.max(0, activeChargeRatio));
+        } else {
+          if (this.gojoChargeAction?.enabled) this.gojoChargeAction.stop();
+          if (this.gojoIdleAction && !this.gojoIdleAction.isRunning()) {
+            this.gojoIdleAction.reset().fadeIn(0.16).play();
+          }
+        }
+      }
+
+      if (this.gojoPovGroup) {
+        const gojoChargeShake =
+          activeChargeRatio > 0 ? (Math.random() - 0.5) * 0.008 * activeChargeRatio : 0;
+        const gojoPullZ = activeChargeRatio * 0.08;
+
+        this.gojoPovGroup.position.set(
+          bobX + this.swayX + gojoChargeShake,
+          bobY + this.swayY - this.recoilOffset * 0.12 + gojoChargeShake,
+          this.recoilOffset * 0.3 + gojoPullZ - this.handDistanceOffset
+        );
+        this.gojoPovGroup.rotation.set(
+          this.recoilOffset * 0.35,
+          this.swayX * 1.2,
+          0
+        );
+      }
+
       if (this.gojoRedChargeOrb) {
         if (this.primaryChargeRatio > 0.02) {
           this.gojoRedChargeOrb.group.visible = true;
-          const s = 0.45 + this.primaryChargeRatio * 1.35;
+          const s = 0.45 + this.primaryChargeRatio * 0.45;
           this.gojoRedChargeOrb.setScale(s);
           this.gojoRedChargeOrb.update(dt, elapsed);
         } else {
@@ -638,28 +1144,27 @@ export class FpsViewModel {
       if (this.gojoBlueChargeOrb) {
         if (this.blueChargeRatio > 0.02) {
           this.gojoBlueChargeOrb.group.visible = true;
-          // Expands dynamically as Blue is held and charged up
-          const s = 0.45 + this.blueChargeRatio * 2.15;
+          const s = 0.45 + this.blueChargeRatio * 0.45;
           this.gojoBlueChargeOrb.setScale(s);
           this.gojoBlueChargeOrb.update(dt, elapsed);
         } else {
           this.gojoBlueChargeOrb.group.visible = false;
         }
       }
-    }
-
-    // Left hand is only visible when actively performing a Quick Melee strike
-    if (this.quickMeleeProgress > 0.01) {
-      this.leftHandGroup.visible = true;
-      const meleeThrust = Math.sin((1 - this.quickMeleeProgress) * Math.PI);
-      this.leftHandGroup.position.set(
-        -0.38 + meleeThrust * 0.32,
-        -0.34 + meleeThrust * 0.24,
-        -0.35 - meleeThrust * 0.45
-      );
-      this.leftHandGroup.rotation.set(meleeThrust * 0.55, meleeThrust * 0.35, -meleeThrust * 0.25);
     } else {
-      this.leftHandGroup.visible = false;
+      // Left hand is only visible when actively performing a Quick Melee strike for non-Gojo heroes
+      if (this.quickMeleeProgress > 0.01) {
+        this.leftHandGroup.visible = true;
+        const meleeThrust = Math.sin((1 - this.quickMeleeProgress) * Math.PI);
+        this.leftHandGroup.position.set(
+          -0.38 + meleeThrust * 0.32,
+          -0.34 + meleeThrust * 0.24,
+          -0.35 - meleeThrust * 0.45
+        );
+        this.leftHandGroup.rotation.set(meleeThrust * 0.55, meleeThrust * 0.35, -meleeThrust * 0.25);
+      } else {
+        this.leftHandGroup.visible = false;
+      }
     }
   }
 }

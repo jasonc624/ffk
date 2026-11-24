@@ -4,15 +4,23 @@
   import { getCharacter, saveCharacter, type CharacterData } from '$lib/games/fighter/storage';
   import { ROSTER } from '$lib/games/fighter/data/roster';
   import { FPS_MOBA_HEROES } from '$lib/games/fps-moba/data/heroes';
-  import { getSelectedFpsHero, setSelectedFpsHero } from '$lib/games/fps-moba/storage';
+  import {
+    getSelectedFpsHero,
+    setSelectedFpsHero,
+    getSelectedFpsMap,
+    setSelectedFpsMap,
+    MOBA_MAPS,
+    type MobaMapId
+  } from '$lib/games/fps-moba/storage';
   import type { FpsHeroDef, FpsAbilityKey } from '$lib/games/fps-moba/types';
 
   type MenuTab = 'home' | 'heroes' | 'play';
 
-  let activeTab = $state<MenuTab>('home');
+  let activeTab = $state<MenuTab>('play');
   let savedFighter = $state<CharacterData | null>(null);
   let selectedFighterId = $state<string>(ROSTER[0].id ?? 'jason');
   let selectedFpsHero = $state<FpsHeroDef>(FPS_MOBA_HEROES[0]);
+  let selectedMapId = $state<MobaMapId>('orlando');
   const abilityKeys: FpsAbilityKey[] = ['SHIFT', 'E', 'Q'];
 
   onMount(() => {
@@ -21,6 +29,7 @@
       selectedFighterId = savedFighter.id;
     }
     selectedFpsHero = getSelectedFpsHero();
+    selectedMapId = getSelectedFpsMap();
   });
 
   function ensureFighterSaved() {
@@ -56,8 +65,14 @@
     setSelectedFpsHero(hero.id);
   }
 
+  function selectMobaMap(mapId: MobaMapId) {
+    selectedMapId = mapId;
+    setSelectedFpsMap(mapId);
+  }
+
   function startMobaMatchNow() {
     setSelectedFpsHero(selectedFpsHero.id);
+    setSelectedFpsMap(selectedMapId);
     goto('/fps-moba/play');
   }
 </script>
@@ -131,8 +146,23 @@
       </button>
     </div>
 
-    <!-- Right: Options Cog -->
+    <!-- Right: Admin Workbench + Options Cog -->
     <div class="flex items-center gap-3 h-full">
+      <button
+        onclick={() => goto('/admin')}
+        aria-label="Admin Workbench"
+        title="Admin Workbench"
+        class="h-10 px-3 rounded-lg bg-white/5 hover:bg-sky-500/15 border border-white/10 hover:border-sky-400/50 flex items-center gap-1.5 font-['Share_Tech_Mono'] text-xs text-slate-300 hover:text-sky-200 transition-all cursor-pointer"
+      >
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7" rx="1" />
+          <rect x="14" y="3" width="7" height="7" rx="1" />
+          <rect x="14" y="14" width="7" height="7" rx="1" />
+          <rect x="3" y="14" width="7" height="7" rx="1" />
+        </svg>
+        <span class="hidden sm:inline tracking-[0.15em]">ADMIN</span>
+      </button>
+
       <button
         onclick={() => goto('/options')}
         aria-label="Options"
@@ -250,19 +280,52 @@
               </p>
 
               <!-- Quick 3D Operative Picker -->
-              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-5">
+              <div class="font-['Share_Tech_Mono'] text-[10px] tracking-widest text-slate-400 uppercase mb-1.5 flex justify-between">
+                <span>SELECT OPERATIVE</span>
+                <span class="text-sky-300 font-bold">{selectedFpsHero.name}</span>
+              </div>
+              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
                 {#each FPS_MOBA_HEROES as hero}
                   {@const isSelected = selectedFpsHero.id === hero.id}
                   <button
                     onclick={() => selectMobaHero(hero)}
                     class="text-left p-2.5 rounded-xl border transition-all cursor-pointer {isSelected
-                      ? 'bg-sky-500/15 border-sky-400 text-white'
+                      ? 'bg-sky-500/15 border-sky-400 text-white shadow-[0_0_15px_rgba(56,189,248,0.25)]'
                       : 'bg-white/5 border-white/10 text-slate-300 hover:border-white/25'}"
                   >
                     <div class="font-['Share_Tech_Mono'] text-[11px] font-bold truncate" style="color: {hero.color};">
                       {hero.name}
                     </div>
                     <div class="font-['Share_Tech_Mono'] text-[9px] text-slate-400 truncate">{hero.role}</div>
+                  </button>
+                {/each}
+              </div>
+
+              <!-- Quick Map Picker -->
+              <div class="font-['Share_Tech_Mono'] text-[10px] tracking-widest text-slate-400 uppercase mb-1.5 flex justify-between">
+                <span>SELECT MAP</span>
+                <span class="text-amber-300 font-bold">
+                  {MOBA_MAPS.find((m) => m.id === selectedMapId)?.name.toUpperCase()}
+                </span>
+              </div>
+              <div class="grid grid-cols-2 gap-2 mb-5">
+                {#each MOBA_MAPS as map}
+                  {@const isMapSelected = selectedMapId === map.id}
+                  <button
+                    onclick={() => selectMobaMap(map.id)}
+                    class="text-left p-2.5 rounded-xl border transition-all cursor-pointer {isMapSelected
+                      ? 'bg-amber-500/15 border-amber-400 text-white shadow-[0_0_15px_rgba(245,158,11,0.25)]'
+                      : 'bg-white/5 border-white/10 text-slate-300 hover:border-white/25'}"
+                  >
+                    <div class="flex items-center justify-between">
+                      <div class="font-['Share_Tech_Mono'] text-xs font-bold" style="color: {map.accentColor};">
+                        {map.name}
+                      </div>
+                      {#if isMapSelected}
+                        <span class="w-1.5 h-1.5 rounded-full" style="background: {map.accentColor};"></span>
+                      {/if}
+                    </div>
+                    <div class="text-[10px] text-slate-400 truncate mt-0.5">{map.subtitle}</div>
                   </button>
                 {/each}
               </div>
@@ -273,7 +336,7 @@
                 onclick={startMobaMatchNow}
                 class="w-full py-3.5 px-5 rounded-xl bg-gradient-to-r from-sky-400 to-blue-500 hover:brightness-110 text-slate-950 font-['Share_Tech_Mono'] text-xs font-bold tracking-[0.2em] uppercase transition-all shadow-[0_0_25px_rgba(56,189,248,0.4)] cursor-pointer flex items-center justify-between"
               >
-                <span>PLAY 3D FPS ARENA</span>
+                <span>PLAY 3D FPS ARENA ({selectedMapId === 'orlando' ? 'ORLANDO' : 'SHIBUYA'})</span>
                 <span>→</span>
               </button>
               <button

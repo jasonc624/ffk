@@ -1543,43 +1543,52 @@ export function buildProceduralHeroModel(
     gojo: 0x161e2e,
     higuruma: 0x1e293b,
     doom: 0x450a0a,
+    jogo: 0x261d17,
+    megumi: 0x0f172a,
     brigid: 0x422006,
     vex: 0x0f172a,
     kael: 0x3b0764,
-    mr_biomaster: 0x14532d
+    mr_biomaster: 0x14532d,
+    uro: 0x38bdf8
   };
   const pantsColorMap: Record<string, number> = {
     gojo: 0x111827,
     higuruma: 0x111827,
     doom: 0x1c1917,
+    jogo: 0x1a1410,
+    megumi: 0x0b1120,
     brigid: 0x292524,
     vex: 0x1e293b,
     kael: 0x1e1b4b,
-    mr_biomaster: 0x052e16
+    mr_biomaster: 0x052e16,
+    uro: 0x0ea5e9
   };
   const skinColorMap: Record<string, number> = {
     gojo: 0xffe0d0,
     higuruma: 0xf7d7c4,
     doom: 0x7c4a32,
+    jogo: 0x6b645c,
+    megumi: 0xf7dac6,
     brigid: 0xfde2d0,
     vex: 0xf5d0ba,
     kael: 0xe9d5ff,
-    mr_biomaster: 0x4ade80
+    mr_biomaster: 0x4ade80,
+    uro: 0xffe8dd
   };
 
-  const jacketMat = createToonMaterial(jacketColorMap[hero.id] ?? 0x1e293b, primaryCol, 0.06);
-  const pantsMat = createToonMaterial(pantsColorMap[hero.id] ?? 0x0f172a, 0x000000, 0.04);
+  const jacketMat = createToonMaterial(jacketColorMap[hero.id] ?? 0x1e293b, primaryCol, hero.id === 'uro' ? 0.34 : 0.06);
+  const pantsMat = createToonMaterial(pantsColorMap[hero.id] ?? 0x0f172a, hero.id === 'uro' ? primaryCol : 0x000000, hero.id === 'uro' ? 0.25 : 0.04);
   const skinMat = createToonMaterial(skinColorMap[hero.id] ?? 0xfde2d0, 0x000000, 0.03);
   const accentMat = createToonMaterial(primaryCol, primaryCol, 0.25);
-  const bootMat = createToonMaterial(0x090d16, 0x000000, 0.05);
+  const bootMat = createToonMaterial(hero.id === 'uro' ? 0xe0f2fe : 0x090d16, hero.id === 'uro' ? 0x67e8f9 : 0x000000, hero.id === 'uro' ? 0.18 : 0.05);
   const hairMat = createToonMaterial(
-    hero.id === 'gojo' ? 0xf8fafc : hero.id === 'higuruma' ? 0x171412 : 0x334155,
-    hero.id === 'gojo' ? 0xbae6fd : 0x000000,
-    hero.id === 'gojo' ? 0.16 : 0.04
+    hero.id === 'gojo' || hero.id === 'uro' ? 0xf8fafc : hero.id === 'higuruma' ? 0x171412 : 0x334155,
+    hero.id === 'gojo' || hero.id === 'uro' ? 0xbae6fd : 0x000000,
+    hero.id === 'gojo' || hero.id === 'uro' ? 0.16 : 0.04
   );
 
   const isHeavy = hero.id === 'higuruma' || hero.id === 'doom';
-  const torsoWidthScale = isHeavy ? 1.24 : hero.id === 'gojo' ? 1.12 : 1.06;
+  const torsoWidthScale = isHeavy ? 1.24 : hero.id === 'gojo' ? 1.12 : hero.id === 'uro' ? 0.92 : 1.06;
   const torsoDepthScale = isHeavy ? 0.84 : 0.72;
 
   // Root Pelvis/Hips Pivot
@@ -1831,6 +1840,141 @@ export function buildProceduralHeroModel(
       outlineMat,
       hitMeshes
     );
+  } else if (hero.id === 'jogo') {
+    // Jogo's iconic flat-top volcano head with glowing molten crater + single cyclops eye
+    const volcanoMat = createToonMaterial(0x3a322c, 0x7c2d12, 0.14);
+    const craterCone = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.21, 0.24, 16), volcanoMat);
+    craterCone.position.set(0, 0.24, 0);
+    addOutline(craterCone, outlineMat, 1.05, 1.03, 1.05);
+    headGroup.add(craterCone);
+    hitMeshes.push(craterCone);
+
+    const lavaCore = new THREE.Mesh(
+      new THREE.CircleGeometry(0.095, 16),
+      new THREE.MeshBasicMaterial({ color: 0xff4500 })
+    );
+    lavaCore.rotation.x = -Math.PI / 2;
+    lavaCore.position.set(0, 0.365, 0);
+    headGroup.add(lavaCore);
+
+    // Single large cyclops eye in the center of the face
+    const eyeSclera = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 16, 14),
+      new THREE.MeshBasicMaterial({ color: 0xfef08a })
+    );
+    eyeSclera.scale.set(1.15, 0.85, 0.5);
+    eyeSclera.position.set(0, 0.02, 0.175);
+    const pupil = new THREE.Mesh(
+      new THREE.SphereGeometry(0.036, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0x09090b })
+    );
+    pupil.position.set(0, 0.02, 0.212);
+    headGroup.add(eyeSclera, pupil);
+
+    // Volcanic plug ears
+    [-1, 1].forEach((side) => {
+      const ear = new THREE.Mesh(new THREE.CylinderGeometry(0.042, 0.055, 0.08, 10), volcanoMat);
+      ear.rotation.z = side * Math.PI * 0.5;
+      ear.position.set(side * 0.205, 0.02, 0);
+      headGroup.add(ear);
+    });
+
+    // High volcanic cloak collar
+    const collar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.24, 0.28, 0.2, 16, 1, true),
+      createToonMaterial(0x1f1916, 0x000000, 0.05)
+    );
+    collar.position.set(0, 0.48, -0.02);
+    upperBodyGroup.add(collar);
+  } else if (hero.id === 'megumi') {
+    // Megumi's spiky dark navy-black hair crown + glowing indigo shadow-blade
+    const megumiHairMat = createToonMaterial(0x0b0f1c, 0x312e81, 0.12);
+    for (let i = 0; i < 10; i++) {
+      const ang = (i / 10) * Math.PI * 2;
+      const spike = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.26, 6), megumiHairMat);
+      spike.position.set(Math.cos(ang) * 0.14, 0.18 + (i % 2) * 0.05, Math.sin(ang) * 0.14);
+      spike.rotation.z = -Math.cos(ang) * 0.85;
+      spike.rotation.x = Math.sin(ang) * 0.85;
+      headGroup.add(spike);
+    }
+    const sword = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.92, 0.025),
+      createToonMaterial(0x111827, 0x6366f1, 0.35)
+    );
+    sword.position.set(0, -0.62, 0.32);
+    sword.rotation.x = Math.PI * 0.35;
+    rightArm.pivot.add(sword);
+    hitMeshes.push(sword);
+  } else if (hero.id === 'uro') {
+    // Takako Uro: flowing pale silver-white bob hair with sweeping bangs, dark sclera + golden irises,
+    // and luminous warped-sky silk ribbons wrapping around her body & wrists
+    const uroHairMat = createToonMaterial(0xf1f5f9, 0xbae6fd, 0.18);
+    const hairCrown = new THREE.Mesh(
+      new THREE.SphereGeometry(0.215, 22, 16, 0, Math.PI * 2, 0, Math.PI * 0.62),
+      uroHairMat
+    );
+    hairCrown.position.set(0, 0.04, -0.01);
+    headGroup.add(hairCrown);
+
+    // Sweeping cheek-framing side locks + back curtain
+    [-1, 1].forEach((side) => {
+      const lock = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.028, 0.34, 10), uroHairMat);
+      lock.position.set(side * 0.165, -0.06, 0.06);
+      lock.rotation.z = side * 0.18;
+      headGroup.add(lock);
+    });
+    const backHair = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.21, 0.34, 14, 1, false, Math.PI * 0.65, Math.PI * 0.7), uroHairMat);
+    backHair.position.set(0, -0.06, -0.04);
+    headGroup.add(backHair);
+
+    // Signature dark sclera with luminous amber-gold irises
+    const scleraMat = new THREE.MeshBasicMaterial({ color: 0x090b12 });
+    const irisMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24 });
+    [-1, 1].forEach((side) => {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.036, 12, 10), scleraMat);
+      eye.scale.set(1.25, 0.78, 0.5);
+      eye.position.set(side * 0.072, 0.02, 0.188);
+      const iris = new THREE.Mesh(new THREE.SphereGeometry(0.017, 10, 8), irisMat);
+      iris.position.set(side * 0.072, 0.02, 0.203);
+      headGroup.add(eye, iris);
+    });
+
+    // Translucent warped-sky veil ribbons swirling around torso and arms ("wearing the sky")
+    const skyVeilMat = new THREE.MeshBasicMaterial({
+      color: 0x7dd3fc,
+      transparent: true,
+      opacity: 0.44,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const skyEdgeMat = new THREE.MeshBasicMaterial({
+      color: 0xf0f9ff,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.55,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const veil1 = new THREE.Mesh(new THREE.TorusGeometry(0.36, 0.045, 10, 32), skyVeilMat);
+    veil1.position.set(0, 0.26, 0);
+    veil1.rotation.set(Math.PI * 0.36, 0.25, 0.42);
+    const veil2 = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.035, 10, 32), skyEdgeMat);
+    veil2.position.set(0, 0.08, 0);
+    veil2.rotation.set(Math.PI * 0.56, -0.32, -0.35);
+    upperBodyGroup.add(veil1, veil2);
+
+    // Sky-manipulation refraction rings around both wrists
+    const wristGeo = new THREE.TorusGeometry(0.11, 0.016, 8, 22);
+    const leftWristRing = new THREE.Mesh(wristGeo, skyVeilMat);
+    leftWristRing.position.set(0, -0.52, 0.05);
+    leftWristRing.rotation.x = Math.PI * 0.5;
+    leftArm.pivot.add(leftWristRing);
+
+    const rightWristRing = new THREE.Mesh(wristGeo, skyVeilMat);
+    rightWristRing.position.set(0, -0.52, 0.05);
+    rightWristRing.rotation.x = Math.PI * 0.5;
+    rightArm.pivot.add(rightWristRing);
   } else {
     const pauldronGeo = new THREE.SphereGeometry(0.145, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.62);
     [-1, 1].forEach((side) => {
@@ -2119,6 +2263,17 @@ export function buildProceduralHeroModel(
         leftArm.lowerPivot.rotation.x = -0.18;
         rightArm.pivot.rotation.set(-0.35 + breath * 0.04, 0, 0.14);
         rightArm.lowerPivot.rotation.x = -0.48;
+      } else if (hero.id === 'uro') {
+        // Weightless floating sky-manipulation stance with open palms catching the air
+        hipsGroup.position.y = 1.04 + Math.sin(elapsed * 2.4) * 0.08;
+        leftLeg.pivot.rotation.set(-0.18, 0, -0.06);
+        rightLeg.pivot.rotation.set(0.22, 0, 0.06);
+        leftLeg.lowerPivot.rotation.x = 0.28;
+        rightLeg.lowerPivot.rotation.x = 0.38;
+        leftArm.pivot.rotation.set(-0.45 + breath * 0.06, 0.0, -0.34);
+        leftArm.lowerPivot.rotation.x = -0.68;
+        rightArm.pivot.rotation.set(-0.56 - breath * 0.06, 0.0, 0.32);
+        rightArm.lowerPivot.rotation.x = -0.76;
       } else {
         leftArm.pivot.rotation.set(-0.22 + breath * 0.04, 0, -0.16);
         leftArm.lowerPivot.rotation.x = -0.25;
