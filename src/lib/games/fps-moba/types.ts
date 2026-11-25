@@ -1,5 +1,5 @@
 export type MobaTeam = 'blue' | 'red';
-export type MobaUnitType = 'HERO' | 'MINION' | 'SHIKIGAMI' | 'TOWER' | 'CORE';
+export type MobaUnitType = 'HERO' | 'MINION' | 'SHIKIGAMI' | 'CONSTRUCT' | 'TOWER' | 'CORE';
 export type FpsAbilityKey = 'SHIFT' | 'E' | 'Q';
 export type MobaMapId = 'arena' | 'orlando';
 

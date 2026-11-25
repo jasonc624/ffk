@@ -292,11 +292,14 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       projectileColor: '#6366f1'
     },
     secondaryFire: {
-      name: 'Unassigned',
-      kind: 'NONE',
+      name: 'Rabbit Escape [Hold Right Click]',
+      kind: 'RABBIT_ESCAPE',
       description:
-        'No secondary fire — wield the Cursed-Tool Broadsword and command Ten Shadows Shikigami through Shadow Step, Rabbit Escape / Nue, and Chimera Shadow Garden.',
-      color: '#6366f1'
+        'Hold [M2] to unleash a rising column of white Shikigami rabbits (20 HP each) that lifts Megumi higher the longer you hold (spawning more rabbits and draining Cursed Energy) while the rabbits remain on the field attacking nearby enemies! Hold [SPACE] midair to have Nue carry you in any direction for 2.0s.',
+      manaCost: 12,
+      manaDrainPerSec: 22,
+      cooldownMs: 6500,
+      color: '#e2e8f0'
     },
     abilities: {
       SHIFT: {
@@ -314,15 +317,15 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       },
       E: {
         key: 'E',
-        name: 'Rabbit Escape / Nue',
+        name: 'Nue / Toad (Gama)',
         description:
-          'Unleash a swarming flood of white Shikigami rabbits and launch Megumi high into the air! Hold [SPACE] midair to have Nue carry you in any direction for 2.0s.',
-        cooldownMs: 6500,
-        manaCost: 22,
-        kind: 'RABBIT_ESCAPE_NUE',
-        damage: 8,
-        radius: 6.0,
-        durationMs: 7500,
+          'Summon Nue to swoop down from the sky and stun-shock enemies in an area, or aim at an ally to have Toad pull them to safety (+35 HP heal).',
+        cooldownMs: 7000,
+        manaCost: 24,
+        kind: 'NUE_TOAD',
+        damage: 65,
+        radius: 5.5,
+        durationMs: 1100,
         color: '#38bdf8'
       },
       Q: {

@@ -1,6 +1,8 @@
 import * as THREE from 'three';
-import type { MobaTeam, MobaUnitType } from '../types';
-import { MobaUnitEntity } from './Entity';
+import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import type { FpsHeroDef, MobaTeam, MobaUnitType } from '../types';
+import { MobaUnitEntity, type NpcAiState } from './Entity';
+import { applyAnimeToonToScene, getAnimeToonGradient, loadCachedGlb } from './ProceduralHeroBuilder';
 
 export type ShikigamiKind = 'DIVINE_DOG' | 'RABBIT_ESCAPE' | 'TOAD' | 'NUE' | 'MAHORAGA' | 'GENERIC';
 
@@ -15,8 +17,11 @@ export interface ShikigamiTargetableUnit {
   radius: number;
   height: number;
   alive: boolean;
+  isDestructable?: boolean;
   isDummy?: boolean;
   stunTimer?: number;
+  heroDef?: FpsHeroDef;
+  npcAi?: NpcAiState;
 }
 
 export interface ShikigamiTarget {
@@ -29,6 +34,8 @@ export interface ShikigamiContext {
   scene: THREE.Scene;
   units: ShikigamiTargetableUnit[];
   playerPos: THREE.Vector3;
+  playerHp: number;
+  playerMana: number;
   playerDetectable: boolean;
   damageUnit: (
     unit: ShikigamiTargetableUnit,
@@ -72,6 +79,8 @@ export abstract class ShikigamiEntity extends MobaUnitEntity {
   readonly shikigamiKind: ShikigamiKind;
   readonly summonerId: string;
   readonly ownerTeam: MobaTeam;
+  readonly canBeDamagedByAnyone: boolean;
+  readonly canBeDamagedByCaster: boolean;
   remainingLifetimeSec: number | null;
   rogue: boolean = false;
   tracksLowHpThroughWalls: boolean = false;
@@ -83,6 +92,8 @@ export abstract class ShikigamiEntity extends MobaUnitEntity {
       shikigamiKind: ShikigamiKind;
       summonerId: string;
       ownerTeam?: MobaTeam;
+      canBeDamagedByAnyone?: boolean;
+      canBeDamagedByCaster?: boolean;
       lifetimeSec?: number | null;
       tracksLowHpThroughWalls?: boolean;
       beamColor?: string;
@@ -93,6 +104,8 @@ export abstract class ShikigamiEntity extends MobaUnitEntity {
     this.shikigamiKind = opts.shikigamiKind;
     this.summonerId = opts.summonerId;
     this.ownerTeam = opts.ownerTeam ?? opts.team;
+    this.canBeDamagedByAnyone = opts.canBeDamagedByAnyone ?? opts.shikigamiKind === 'MAHORAGA';
+    this.canBeDamagedByCaster = opts.canBeDamagedByCaster ?? opts.shikigamiKind === 'MAHORAGA';
     this.remainingLifetimeSec = opts.lifetimeSec ?? null;
     this.tracksLowHpThroughWalls = opts.tracksLowHpThroughWalls ?? false;
     if (opts.beamColor) this.beamColor = opts.beamColor;
@@ -101,6 +114,19 @@ export abstract class ShikigamiEntity extends MobaUnitEntity {
     for (const hm of this.hitMeshes ?? [this.bodyMesh]) {
       hm.userData.unit = this;
     }
+  }
+
+  /**
+   * Determines whether this Shikigami can take damage from `attackerId` on `attackerTeam`:
+   * - Mahoraga (`canBeDamagedByAnyone: true`): can be damaged by anyone, even his own summoner!
+   * - Nue & Rabbit Escape (`canBeDamagedByCaster: false`): cannot be damaged by their caster,
+   *   but have health pools that can be damaged by enemies (or rogue Mahoraga).
+   */
+  public override canTakeDamageFrom(attackerId: string, attackerTeam: MobaTeam): boolean {
+    if (!this.alive || !this.isDestructable) return false;
+    if (this.canBeDamagedByAnyone) return true;
+    if (attackerId === this.summonerId && !this.canBeDamagedByCaster) return false;
+    return attackerTeam !== this.team;
   }
 
   /** Returns true if this Shikigami currently fights for the player's side. */
@@ -368,7 +394,6 @@ export class RabbitEscapeShikigami extends ShikigamiEntity {
     rabbitGroup.add(bodyMesh, headMesh, earL, earR, earTintL, earTintR, eyeL, eyeR, tail);
 
     const hpBarFill = opts.createHpBar(rabbitGroup, 0.95, 0.65, opts.team);
-    if (hpBarFill.parent) hpBarFill.parent.visible = false;
 
     const hopPhase = opts.hopPhase;
     super({
@@ -377,7 +402,8 @@ export class RabbitEscapeShikigami extends ShikigamiEntity {
       team: opts.team,
       shikigamiKind: 'RABBIT_ESCAPE',
       summonerId: opts.summonerId,
-      maxHp: 45,
+      canBeDamagedByCaster: false,
+      maxHp: 20,
       radius: 0.38,
       height: 0.72,
       group: rabbitGroup,
@@ -391,7 +417,7 @@ export class RabbitEscapeShikigami extends ShikigamiEntity {
       moveSpeed: 15.2,
       goldValue: 0,
       xpValue: 0,
-      lifetimeSec: 7.5,
+      lifetimeSec: null,
       beamColor: '#e2e8f0',
       attackBurstVariant: 'SHADOW',
       animateRig: (elapsed, isMoving) => {
@@ -415,17 +441,29 @@ export class RabbitEscapeShikigami extends ShikigamiEntity {
   }
 
   public override selectTarget(ctx: ShikigamiContext): ShikigamiTarget | null {
-    // Swarm nearest enemy within 28m to disorient & screen Megumi's escape
+    // Remain on the field and swarm nearby enemies (within 50m)
     let bestUnit: ShikigamiTargetableUnit | null = null;
-    let bestDist = 28;
+    let bestDist = 50;
     for (const other of ctx.units) {
-      if (!other.alive || other === this || other.team === this.team || other.type === 'TOWER' || other.type === 'CORE') {
+      if (
+        !other.alive ||
+        other === this ||
+        other.team === this.team ||
+        other.type === 'TOWER' ||
+        other.type === 'CORE'
+      ) {
         continue;
       }
       const d = this.group.position.distanceTo(other.group.position);
       if (d < bestDist) {
         bestDist = d;
         bestUnit = other;
+      }
+    }
+    if (this.team === 'red' && ctx.playerDetectable && ctx.playerHp > 0) {
+      const dp = this.group.position.distanceTo(ctx.playerPos);
+      if (dp < bestDist) {
+        return { unit: null, targetPlayer: true, distance: dp };
       }
     }
     if (bestUnit) {
@@ -478,7 +516,6 @@ export class ToadShikigami extends ShikigamiEntity {
     toadGroup.lookAt(opts.ally.group.position.x, opts.spawnPos.y, opts.ally.group.position.z);
 
     const hpBarFill = opts.createHpBar(toadGroup, 1.5, 0.8, opts.team);
-    if (hpBarFill.parent) hpBarFill.parent.visible = false;
 
     super({
       id: `toad_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -486,12 +523,13 @@ export class ToadShikigami extends ShikigamiEntity {
       team: opts.team,
       shikigamiKind: 'TOAD',
       summonerId: opts.summonerId,
+      canBeDamagedByCaster: false,
       maxHp: 200,
       radius: 0.7,
       height: 1.1,
       group: toadGroup,
       bodyMesh: toadBody,
-      hitMeshes: [],
+      hitMeshes: [toadBody],
       hpBarFill,
       attackRange: 0,
       attackDamage: 0,
@@ -499,7 +537,7 @@ export class ToadShikigami extends ShikigamiEntity {
       moveSpeed: 0,
       goldValue: 0,
       xpValue: 0,
-      isDestructable: false,
+      isDestructable: true,
       lifetimeSec: 0.85,
       beamColor: '#f472b6'
     });
@@ -597,7 +635,6 @@ export class NueShikigami extends ShikigamiEntity {
     group.add(torso, mask, wingLeft, wingRight, sparkAura);
 
     const hpBarFill = opts.createHpBar(group, 1.4, 1.0, opts.team);
-    if (hpBarFill.parent) hpBarFill.parent.visible = false;
 
     super({
       id: `nue_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -605,6 +642,7 @@ export class NueShikigami extends ShikigamiEntity {
       team: opts.team,
       shikigamiKind: 'NUE',
       summonerId: opts.summonerId,
+      canBeDamagedByCaster: false,
       maxHp: 180,
       radius: 1.0,
       height: 1.2,
@@ -741,7 +779,6 @@ export class NueCarryShikigami extends ShikigamiEntity {
     group.add(torso, mask, wingLeft, wingRight);
 
     const hpBarFill = opts.createHpBar(group, 1.4, 0.9, opts.team);
-    if (hpBarFill.parent) hpBarFill.parent.visible = false;
 
     super({
       id: `nue_carry_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -749,13 +786,14 @@ export class NueCarryShikigami extends ShikigamiEntity {
       team: opts.team,
       shikigamiKind: 'NUE',
       summonerId: opts.summonerId,
+      canBeDamagedByCaster: false,
       maxHp: 220,
       radius: 1.0,
       height: 1.0,
       group,
       bodyMesh: torso,
       headMesh: mask,
-      hitMeshes: [],
+      hitMeshes: [torso, mask],
       hpBarFill,
       attackRange: 0,
       attackDamage: 0,
@@ -763,7 +801,7 @@ export class NueCarryShikigami extends ShikigamiEntity {
       moveSpeed: 0,
       goldValue: 0,
       xpValue: 0,
-      isDestructable: false,
+      isDestructable: true,
       lifetimeSec: 2.2,
       beamColor: '#38bdf8',
       attackBurstVariant: 'BLUE'
@@ -799,11 +837,48 @@ export class NueCarryShikigami extends ShikigamiEntity {
  * - Rogue Berserk: once all living enemies on the enemy team are eliminated, flips team
  *   against its summoner and hunts Megumi and Megumi's allies!
  */
+type MahoragaAnimKey = 'skill_01' | 'run' | 'sword_slash' | 'spartan_kick';
+
+interface MahoragaRigHandle {
+  root: THREE.Group;
+  mixer: THREE.AnimationMixer;
+  actions: Record<MahoragaAnimKey, THREE.AnimationAction | null>;
+  activeKey: MahoragaAnimKey | null;
+}
+
+/**
+ * Eight-Handled Sword Divergent Sila Divine General Mahoraga:
+ * - Loaded from `/models/mahoraga_combined.glb` with animations:
+ *   `Skill_01`, `RunFast`, `Right_Hand_Sword_Slash`, `Spartan_Kick`.
+ * - Targets the living enemy with the highest combined Health + Cursed Energy (`hp + ce`)
+ *   and locks onto that target until it kills them!
+ * - Immediately triggers `Skill_01` upon being summoned AND whenever it changes target.
+ * - Cycles through its combat attack animations (`Right_Hand_Sword_Slash` <-> `Spartan_Kick`)
+ *   while striking, and `RunFast` while pursuing its locked target.
+ * - Dharma Wheel Adaptation: takes progressively less damage each time hit by the same move
+ *   (100% -> 72% -> 52% -> 37% -> ... -> 10% floor), clicking its 8-handled golden wheel 45°.
+ * - Rogue Berserk: once all living enemies on the enemy team are eliminated, flips team
+ *   against its summoner and hunts Megumi and Megumi's allies!
+ */
 export class MahoragaShikigami extends ShikigamiEntity {
   private readonly adaptationCounts = new Map<string, number>();
   private readonly wheelGroup: THREE.Group;
+  private readonly fallbackMeshGroup: THREE.Group;
   private wheelCurrentAngle = 0;
   private wheelTargetAngle = 0;
+
+  private lockedTargetId: string | null = null;
+  private unreachableTimer = 0;
+  private bestReachDistance = Infinity;
+  private readonly unreachableCooldowns = new Map<string, number>();
+  private skill01Timer = 1.083;
+  private pendingSkill01Vfx = true;
+  private attackAnimTimer = 0;
+  private activeAttackAnim: 'sword_slash' | 'spartan_kick' = 'sword_slash';
+  private nextAttackIsKick = false;
+  private activeAttackSourceName = 'Sword of Extermination';
+  private rig: MahoragaRigHandle | null = null;
+  private lastRigElapsed = -1;
 
   constructor(opts: {
     spawnPos: THREE.Vector3;
@@ -816,24 +891,29 @@ export class MahoragaShikigami extends ShikigamiEntity {
     group.position.copy(opts.spawnPos);
 
     const skinMat = new THREE.MeshStandardMaterial({
-      color: 0xf1f5f9,
-      emissive: 0x94a3b8,
-      emissiveIntensity: 0.16,
-      roughness: 0.5
+      color: 0xd1d5db,
+      emissive: 0x000000,
+      emissiveIntensity: 0.0,
+      roughness: 0.65
     });
     const clothMat = new THREE.MeshStandardMaterial({
       color: 0x0f172a,
       roughness: 0.8
     });
     const goldMat = new THREE.MeshStandardMaterial({
-      color: 0xfacc15,
-      emissive: 0xd97706,
-      emissiveIntensity: 0.75,
-      metalness: 0.85,
-      roughness: 0.22
+      color: 0xd4a017,
+      emissive: 0x78350f,
+      emissiveIntensity: 0.12,
+      metalness: 0.65,
+      roughness: 0.38
     });
-    const bladeMat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
+    const bladeMat = new THREE.MeshStandardMaterial({
+      color: 0xd4d4d8,
+      metalness: 0.5,
+      roughness: 0.35
+    });
 
+    const fallbackMeshGroup = new THREE.Group();
     const legL = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.19, 1.25, 10), skinMat);
     legL.position.set(-0.34, 0.65, 0);
     const legR = legL.clone();
@@ -842,11 +922,11 @@ export class MahoragaShikigami extends ShikigamiEntity {
     const waist = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.56, 0.65, 12), clothMat);
     waist.position.y = 1.35;
 
-    const bodyMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.66, 0.45, 1.15, 12), skinMat);
-    bodyMesh.position.y = 2.15;
+    const fallbackTorso = new THREE.Mesh(new THREE.CylinderGeometry(0.66, 0.45, 1.15, 12), skinMat);
+    fallbackTorso.position.y = 2.15;
 
-    const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.38, 14, 14), skinMat);
-    headMesh.position.y = 2.95;
+    const fallbackHead = new THREE.Mesh(new THREE.SphereGeometry(0.38, 14, 14), skinMat);
+    fallbackHead.position.y = 2.95;
 
     const crestGeo = new THREE.BoxGeometry(0.72, 0.14, 0.08);
     const crestUL = new THREE.Mesh(crestGeo, skinMat);
@@ -872,9 +952,30 @@ export class MahoragaShikigami extends ShikigamiEntity {
     swordBlade.rotation.x = Math.PI * 0.38;
     armRPivot.add(armR, swordBlade);
 
-    // Eight-Handled Golden Dharma Wheel
+    fallbackMeshGroup.add(
+      legL,
+      legR,
+      waist,
+      fallbackTorso,
+      fallbackHead,
+      crestUL,
+      crestUR,
+      tailCrest,
+      armL,
+      armRPivot
+    );
+
+    // Low-poly invisible hit capsules so raycasting never hits 148k skinned triangles
+    const hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
+    const bodyMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.85, 2.55, 10), hitboxMat);
+    bodyMesh.position.y = 1.45;
+    const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.48, 10, 10), hitboxMat);
+    headMesh.position.y = 3.05;
+    headMesh.userData.isHead = true;
+
+    // Eight-Handled Golden Dharma Wheel floating above Mahoraga
     const wheelGroup = new THREE.Group();
-    wheelGroup.position.set(0, 3.68, -0.15);
+    wheelGroup.position.set(0, 3.75, -0.15);
     const wheelRing = new THREE.Mesh(new THREE.TorusGeometry(0.75, 0.075, 10, 28), goldMat);
     wheelRing.rotation.x = Math.PI * 0.5;
     wheelGroup.add(wheelRing);
@@ -888,7 +989,7 @@ export class MahoragaShikigami extends ShikigamiEntity {
       wheelGroup.add(spoke, handleOrb);
     }
 
-    group.add(legL, legR, waist, bodyMesh, headMesh, crestUL, crestUR, tailCrest, armL, armRPivot, wheelGroup);
+    group.add(fallbackMeshGroup, bodyMesh, headMesh, wheelGroup);
 
     const hpBarFill = opts.createHpBar(group, 4.35, 2.4, opts.ownerTeam);
     const nameplateMesh = opts.createNameplate(group, 4.78, 'MAHORAGA · DIVINE GENERAL', '#facc15');
@@ -900,35 +1001,210 @@ export class MahoragaShikigami extends ShikigamiEntity {
       ownerTeam: opts.ownerTeam,
       shikigamiKind: 'MAHORAGA',
       summonerId: opts.summonerId,
+      canBeDamagedByAnyone: true,
+      canBeDamagedByCaster: true,
       maxHp: 950,
       radius: 1.15,
       height: 3.4,
       group,
       bodyMesh,
       headMesh,
-      hitMeshes: [bodyMesh, headMesh, waist, legL, legR],
+      hitMeshes: [bodyMesh, headMesh],
       hpBarFill,
       nameplateMesh,
       attackRange: 4.4,
       attackDamage: 62,
-      attackCooldown: 0.95,
+      attackCooldown: 1.05,
       moveSpeed: 13.6,
       goldValue: 180,
       xpValue: 140,
       lifetimeSec: null,
       beamColor: '#facc15',
       attackBurstVariant: 'FIRE',
-      animateRig: (elapsed, isMoving) => {
-        const stride = isMoving ? Math.sin(elapsed * 9.5) * 0.45 : 0;
-        legL.rotation.x = stride;
-        legR.rotation.x = -stride;
-        armL.rotation.x = -stride * 0.7;
-        armRPivot.rotation.x = stride * 0.7 - 0.25;
+      animateRig: (elapsed, isMoving, isStunned) => {
+        this.updateMahoragaAnimation(elapsed, isMoving, isStunned);
+        if (!this.rig) {
+          const stride = isMoving ? Math.sin(elapsed * 9.5) * 0.45 : 0;
+          legL.rotation.x = stride;
+          legR.rotation.x = -stride;
+          armL.rotation.x = -stride * 0.7;
+          armRPivot.rotation.x = stride * 0.7 - 0.25;
+        }
       }
     });
 
     this.wheelGroup = wheelGroup;
+    this.fallbackMeshGroup = fallbackMeshGroup;
     this.attackTimer = 0.35;
+    void this.loadMahoragaGlb();
+  }
+
+  private async loadMahoragaGlb(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    try {
+      const gltf = await loadCachedGlb('/models/mahoraga_combined.glb');
+      const toonGrad = getAnimeToonGradient();
+      const animRoot = cloneSkeleton(gltf.scene) as THREE.Group;
+      // Native mesh height is 2.70m; scale to 3.40m towering Divine General stature
+      animRoot.scale.setScalar(3.4 / 2.7);
+      applyAnimeToonToScene(animRoot, toonGrad);
+      // Tone down albedo & zero out emissive on Mahoraga's pale skin so directional light + HDR exposure (1.4)
+      // never pushes his mesh above the UnrealBloomPass threshold (1.28)
+      animRoot.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          const mat = (obj as THREE.Mesh).material as THREE.MeshToonMaterial | undefined;
+          if (mat && mat.isMeshToonMaterial) {
+            mat.color.setHex(0xb8bec8);
+            mat.emissive.setHex(0x000000);
+            mat.emissiveIntensity = 0.0;
+          }
+        }
+      });
+
+      const mixer = new THREE.AnimationMixer(animRoot);
+      const findClip = (substr: string) =>
+        gltf.animations.find((c) => c.name.toLowerCase().includes(substr.toLowerCase())) ?? null;
+
+      const skillClip = findClip('Skill_01');
+      const runClip = findClip('RunFast');
+      const slashClip = findClip('Right_Hand_Sword_Slash');
+      const kickClip = findClip('Spartan_Kick');
+
+      const makeAction = (clip: THREE.AnimationClip | null, loop: boolean) => {
+        if (!clip) return null;
+        const act = mixer.clipAction(clip);
+        if (loop) {
+          act.setLoop(THREE.LoopRepeat, Infinity);
+        } else {
+          act.setLoop(THREE.LoopOnce, 1);
+          act.clampWhenFinished = true;
+        }
+        return act;
+      };
+
+      const actions: Record<MahoragaAnimKey, THREE.AnimationAction | null> = {
+        skill_01: makeAction(skillClip, false),
+        run: makeAction(runClip, true),
+        sword_slash: makeAction(slashClip, false),
+        spartan_kick: makeAction(kickClip, false)
+      };
+
+      this.fallbackMeshGroup.visible = false;
+      this.group.add(animRoot);
+      this.rig = {
+        root: animRoot,
+        mixer,
+        actions,
+        activeKey: null
+      };
+
+      // Immediately play Skill_01 if still in the summon / target-switch Skill_01 window
+      if (this.skill01Timer > 0) {
+        this.playRigAction('skill_01', true);
+      } else {
+        this.playRigAction('run', true);
+      }
+    } catch (err) {
+      console.warn('Failed to load mahoraga_combined.glb:', err);
+    }
+  }
+
+  private playRigAction(key: MahoragaAnimKey, forceReset = false): void {
+    if (!this.rig) return;
+    const nextAction = this.rig.actions[key];
+    if (!nextAction) return;
+    if (this.rig.activeKey === key && !forceReset) return;
+
+    const prevAction = this.rig.activeKey ? this.rig.actions[this.rig.activeKey] : null;
+    nextAction.enabled = true;
+    nextAction.reset();
+    nextAction.setEffectiveWeight(1.0);
+    nextAction.setEffectiveTimeScale(key === 'run' ? 0.92 : 1.0);
+    nextAction.play();
+    if (prevAction && prevAction !== nextAction) {
+      prevAction.enabled = true;
+      nextAction.crossFadeFrom(prevAction, 0.16, false);
+    }
+    this.rig.activeKey = key;
+  }
+
+  private updateMahoragaAnimation(elapsed: number, isMoving: boolean, isStunned: boolean): void {
+    if (!this.rig) return;
+    const dt =
+      this.lastRigElapsed < 0 ? 0.016 : Math.max(0, Math.min(0.1, elapsed - this.lastRigElapsed));
+    this.lastRigElapsed = elapsed;
+
+    if (isStunned) return;
+
+    if (this.skill01Timer > 0) {
+      if (this.rig.activeKey !== 'skill_01') {
+        this.playRigAction('skill_01', true);
+      }
+    } else if (this.attackAnimTimer > 0) {
+      if (this.rig.activeKey !== this.activeAttackAnim) {
+        this.playRigAction(this.activeAttackAnim, true);
+      }
+    } else if (isMoving) {
+      if (this.rig.actions.run) {
+        this.rig.actions.run.setEffectiveTimeScale(0.92);
+      }
+      if (this.rig.activeKey !== 'run') {
+        this.playRigAction('run', true);
+      }
+    } else {
+      // Idle combat ready poise: slow breathing cadence on RunFast / combat stance
+      if (this.rig.actions.run) {
+        if (this.rig.activeKey !== 'run') {
+          this.playRigAction('run', true);
+        }
+        this.rig.actions.run.setEffectiveTimeScale(0.18);
+      }
+    }
+
+    this.rig.mixer.update(dt);
+  }
+
+  /** Returns true when Mahoraga is not locked in his `Skill_01` summon / target-switch roar animation. */
+  public canMoveNow(): boolean {
+    return this.skill01Timer <= 0;
+  }
+
+  /**
+   * Cycles between Mahoraga's `Right_Hand_Sword_Slash` and `Spartan_Kick` attack animations
+   * whenever he strikes his target, returning the active move label & knockback distance.
+   */
+  public triggerNextCombatAttack(): { attackName: string; isKick: boolean; knockback: number } {
+    const isKick = this.nextAttackIsKick;
+    this.nextAttackIsKick = !this.nextAttackIsKick;
+    if (isKick) {
+      this.activeAttackAnim = 'spartan_kick';
+      this.attackAnimTimer = 0.95;
+      this.activeAttackSourceName = 'Mahoraga Spartan Kick';
+      this.playRigAction('spartan_kick', true);
+      return { attackName: 'Mahoraga Spartan Kick', isKick: true, knockback: 8.5 };
+    } else {
+      this.activeAttackAnim = 'sword_slash';
+      this.attackAnimTimer = 0.95;
+      this.activeAttackSourceName = 'Right Hand Sword Slash';
+      this.playRigAction('sword_slash', true);
+      return { attackName: 'Right Hand Sword Slash', isKick: false, knockback: 4.2 };
+    }
+  }
+
+  /**
+   * Triggers Mahoraga's `Skill_01` animation and golden shockwave burst immediately on summon
+   * and whenever he locks onto a new target.
+   */
+  private triggerSkill01(): void {
+    this.skill01Timer = 1.083;
+    this.attackAnimTimer = 0;
+    this.pendingSkill01Vfx = true;
+    this.playRigAction('skill_01', true);
+  }
+
+  /** Called whenever Mahoraga successfully lands a melee strike on his current target. */
+  public notifyAttackLanded(): void {
+    this.unreachableTimer = 0;
   }
 
   public override tickShikigami(dt: number, elapsed: number, ctx: ShikigamiContext): boolean {
@@ -939,6 +1215,64 @@ export class MahoragaShikigami extends ShikigamiEntity {
     );
     this.wheelGroup.rotation.y = this.wheelCurrentAngle;
 
+    if (this.skill01Timer > 0) {
+      this.skill01Timer = Math.max(0, this.skill01Timer - dt);
+    }
+    if (this.attackAnimTimer > 0) {
+      this.attackAnimTimer = Math.max(0, this.attackAnimTimer - dt);
+    }
+    if (this.pendingSkill01Vfx) {
+      this.pendingSkill01Vfx = false;
+      this.wheelTargetAngle += Math.PI / 4;
+      const origin = this.group.position.clone();
+      ctx.spawnImpactRing(origin.clone().add(new THREE.Vector3(0, 0.25, 0)), '#d97706', 4.6);
+      ctx.spawnCursedBurst(origin.clone().add(new THREE.Vector3(0, 1.6, 0)), 'SHADOW', 1.8, 36);
+    }
+
+    // Decrement unreachable target cooldowns
+    for (const [tid, rem] of this.unreachableCooldowns.entries()) {
+      if (rem - dt <= 0) {
+        this.unreachableCooldowns.delete(tid);
+      } else {
+        this.unreachableCooldowns.set(tid, rem - dt);
+      }
+    }
+
+    // Track whether Mahoraga has failed to reach or close in on his locked target for over 3.0 seconds
+    if (this.lockedTargetId && this.skill01Timer <= 0) {
+      let curDist: number | null = null;
+      if (this.lockedTargetId === 'player') {
+        if (ctx.playerDetectable && ctx.playerHp > 0) {
+          curDist = this.group.position.distanceTo(ctx.playerPos);
+        }
+      } else {
+        const lu = ctx.units.find((u) => u.id === this.lockedTargetId && u.alive);
+        if (lu) {
+          curDist = this.group.position.distanceTo(lu.group.position);
+        }
+      }
+
+      if (curDist !== null) {
+        if (curDist <= this.attackRange) {
+          // Within melee reach
+          this.unreachableTimer = 0;
+          this.bestReachDistance = curDist;
+        } else if (curDist < this.bestReachDistance - 0.65) {
+          // Making steady forward progress toward the target
+          this.bestReachDistance = curDist;
+          this.unreachableTimer = Math.max(0, this.unreachableTimer - dt * 0.5);
+        } else {
+          // Blocked by a wall/domain barrier, outrun, or unable to reach for > 3 seconds
+          this.unreachableTimer += dt;
+          if (this.unreachableTimer >= 3.0) {
+            this.unreachableCooldowns.set(this.lockedTargetId, 6.0);
+            this.unreachableTimer = 0;
+            this.bestReachDistance = Infinity;
+          }
+        }
+      }
+    }
+
     if (!this.rogue) {
       const enemyTeam: MobaTeam = this.ownerTeam === 'blue' ? 'red' : 'blue';
       const remainingEnemies = ctx.units.some(
@@ -947,11 +1281,15 @@ export class MahoragaShikigami extends ShikigamiEntity {
           other !== this &&
           other.team === enemyTeam &&
           other.type !== 'TOWER' &&
-          other.type !== 'CORE'
+          other.type !== 'CORE' &&
+          other.isDestructable !== false
       );
       if (!remainingEnemies) {
         this.rogue = true;
         this.team = enemyTeam;
+        this.lockedTargetId = null; // Force re-acquire & trigger Skill_01 on new target
+        this.unreachableTimer = 0;
+        this.bestReachDistance = Infinity;
         ctx.spawnImpactRing(this.group.position.clone().add(new THREE.Vector3(0, 1.5, 0)), '#ef4444', 9.0);
         ctx.spawnCursedBurst(this.group.position.clone().add(new THREE.Vector3(0, 2.0, 0)), 'RED', 3.4, 90);
         ctx.spawnPopup('⚠ MAHORAGA TURNS ON SUMMONER!', '#ef4444', 26, 0, true);
@@ -961,35 +1299,125 @@ export class MahoragaShikigami extends ShikigamiEntity {
     return super.tickShikigami(dt, elapsed, ctx);
   }
 
+  /**
+   * Scores any valid combatant (Players, NPCs, Shikigami, or Minions) by their combined
+   * Health + Cursed Energy (`hp + ce`) so Mahoraga targets Shikigamis, NPCs, and Players alike.
+   */
+  private getUnitHpAndCeScore(u: ShikigamiTargetableUnit): number {
+    const ce =
+      u.npcAi !== undefined
+        ? u.npcAi.ce
+        : u.heroDef !== undefined
+          ? u.heroDef.maxMana * (u.hp / Math.max(1, u.maxHp))
+          : u.type === 'HERO'
+            ? 100 * (u.hp / Math.max(1, u.maxHp))
+            : u.type === 'SHIKIGAMI'
+              ? 60 * (u.hp / Math.max(1, u.maxHp))
+              : 0;
+    return u.hp + ce;
+  }
+
+  private isValidCombatTargetUnit(u: ShikigamiTargetableUnit): boolean {
+    if (!u.alive || u === this) return false;
+    if (u.type === 'TOWER' || u.type === 'CORE' || u.type === 'CONSTRUCT') return false;
+    if (u.isDestructable === false) return false;
+    // When rogue, Mahoraga hunts everyone (Players, NPCs, and Shikigami alike); otherwise enemy team units
+    if (!this.rogue && u.team === this.team) return false;
+    return true;
+  }
+
   public override selectTarget(ctx: ShikigamiContext): ShikigamiTarget | null {
-    let bestUnit: ShikigamiTargetableUnit | null = null;
-    let bestDist = Infinity;
+    // 1. Keep locked onto the current target until killed, UNLESS they became unreachable for > 3 seconds
+    const lockedTimedOut =
+      this.lockedTargetId !== null && this.unreachableCooldowns.has(this.lockedTargetId);
 
-    for (const other of ctx.units) {
-      if (
-        !other.alive ||
-        other === this ||
-        other.team === this.team ||
-        other.type === 'TOWER' ||
-        other.type === 'CORE'
-      ) {
-        continue;
-      }
-      const d = this.group.position.distanceTo(other.group.position);
-      if (d < bestDist) {
-        bestDist = d;
-        bestUnit = other;
-      }
-    }
-
-    if (this.team === 'red' && ctx.playerDetectable) {
-      const dp = this.group.position.distanceTo(ctx.playerPos);
-      if (dp < bestDist && dp <= 85) {
-        return { unit: null, targetPlayer: true, distance: dp };
+    if (!lockedTimedOut) {
+      if (this.lockedTargetId === 'player') {
+        if ((this.team === 'red' || this.rogue) && ctx.playerDetectable && ctx.playerHp > 0) {
+          const dp = this.group.position.distanceTo(ctx.playerPos);
+          return { unit: null, targetPlayer: true, distance: dp };
+        }
+      } else if (this.lockedTargetId) {
+        const lockedUnit = ctx.units.find(
+          (u) => u.id === this.lockedTargetId && this.isValidCombatTargetUnit(u)
+        );
+        if (lockedUnit) {
+          const d = this.group.position.distanceTo(lockedUnit.group.position);
+          return { unit: lockedUnit, targetPlayer: false, distance: d };
+        }
       }
     }
 
-    return bestUnit ? { unit: bestUnit, targetPlayer: false, distance: bestDist } : null;
+    // 2. Pick the highest (HP + CE) target among Shikigami, NPCs, and Players (skipping unreachable-cooldown targets if alternatives exist)
+    const pickBest = (ignoreCooldowns: boolean): {
+      unit: ShikigamiTargetableUnit | null;
+      targetPlayer: boolean;
+      dist: number;
+    } => {
+      let bestUnit: ShikigamiTargetableUnit | null = null;
+      let bestScore = -Infinity;
+      let bestDist = Infinity;
+      let targetPlayer = false;
+
+      for (const other of ctx.units) {
+        if (!this.isValidCombatTargetUnit(other)) continue;
+        if (!ignoreCooldowns && this.unreachableCooldowns.has(other.id)) continue;
+
+        const score = this.getUnitHpAndCeScore(other);
+        const d = this.group.position.distanceTo(other.group.position);
+        if (score > bestScore || (Math.abs(score - bestScore) < 1 && d < bestDist)) {
+          bestScore = score;
+          bestDist = d;
+          bestUnit = other;
+          targetPlayer = false;
+        }
+      }
+
+      const canTargetPlayer =
+        (this.team === 'red' || this.rogue) &&
+        ctx.playerDetectable &&
+        ctx.playerHp > 0 &&
+        (ignoreCooldowns || !this.unreachableCooldowns.has('player'));
+
+      if (canTargetPlayer) {
+        const playerScore = ctx.playerHp + ctx.playerMana;
+        const dp = this.group.position.distanceTo(ctx.playerPos);
+        if (playerScore > bestScore || (Math.abs(playerScore - bestScore) < 1 && dp < bestDist)) {
+          bestScore = playerScore;
+          bestDist = dp;
+          bestUnit = null;
+          targetPlayer = true;
+        }
+      }
+
+      return { unit: bestUnit, targetPlayer, dist: bestDist };
+    };
+
+    let chosen = pickBest(false);
+    if (!chosen.unit && !chosen.targetPlayer) {
+      chosen = pickBest(true);
+    }
+
+    const nextTargetId = chosen.targetPlayer ? 'player' : chosen.unit ? chosen.unit.id : null;
+    if (nextTargetId && nextTargetId !== this.lockedTargetId) {
+      const hadPreviousTarget = this.lockedTargetId !== null;
+      this.lockedTargetId = nextTargetId;
+      this.unreachableTimer = 0;
+      this.bestReachDistance = chosen.dist;
+      // Trigger Skill_01 whenever Mahoraga changes target (whether from a kill or 3s unreachable timeout)
+      if (hadPreviousTarget) {
+        this.triggerSkill01();
+      }
+    } else if (!nextTargetId) {
+      this.lockedTargetId = null;
+      this.unreachableTimer = 0;
+      this.bestReachDistance = Infinity;
+    }
+
+    if (chosen.targetPlayer) {
+      return { unit: null, targetPlayer: true, distance: chosen.dist };
+    }
+    return chosen.unit ? { unit: chosen.unit, targetPlayer: false, distance: chosen.dist } : null;
   }
 
   public override modifyIncomingDamage(
@@ -1006,7 +1434,7 @@ export class MahoragaShikigami extends ShikigamiEntity {
     this.adaptationCounts.set(key, stacks + 1);
     this.wheelTargetAngle += Math.PI / 4; // 45-degree iconic Dharma Wheel turn
 
-    const wheelWorld = this.group.position.clone().add(new THREE.Vector3(0, 3.68, 0));
+    const wheelWorld = this.group.position.clone().add(new THREE.Vector3(0, 3.75, 0));
     ctx.spawnImpactRing(wheelWorld, '#facc15', 2.4);
 
     if (stacks >= 1) {

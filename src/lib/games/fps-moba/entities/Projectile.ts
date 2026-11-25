@@ -29,6 +29,7 @@ export interface ProjectileUnit {
   stunTimer?: number;
   verticalVel?: number;
   pullActiveTimer?: number;
+  canTakeDamageFrom?: (attackerId: string, attackerTeam: MobaTeam) => boolean;
 }
 
 /**
@@ -268,10 +269,13 @@ export abstract class Projectile {
       }
     }
 
-    // 2. Check proximity with enemy units
+    // 2. Check proximity with damageable units (enemies, destructible constructs, or universal-damage summons like Mahoraga)
     for (const u of ctx.units) {
-      if (!u.alive) continue;
-      if (this.caster ? u === this.caster : u.team === this.team) continue;
+      if (!u.alive || u === this.caster) continue;
+      const canHit = u.canTakeDamageFrom
+        ? u.canTakeDamageFrom(this.casterId, this.team)
+        : u.team !== this.team;
+      if (!canHit) continue;
       const unitCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
       if (unitCenter.distanceTo(this.mesh.position) <= u.radius + this.radius + 0.35) {
         this.onHitUnit(u, this.mesh.position.clone(), ctx);
@@ -467,7 +471,11 @@ export class ReversalRedProjectile extends Projectile {
     }
 
     for (const u of ctx.units) {
-      if (!u.alive || u.team === this.team || u === directUnit) continue;
+      if (!u.alive || u === directUnit) continue;
+      const canHit = u.canTakeDamageFrom
+        ? u.canTakeDamageFrom(this.casterId, this.team)
+        : u.team !== this.team;
+      if (!canHit) continue;
       const unitCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
       if (unitCenter.distanceTo(impactPos) <= this.splashRadius + u.radius) {
         ctx.damageUnit(
@@ -639,8 +647,11 @@ export class LapseBlueProjectile extends Projectile {
     ctx.spawnImpactRing(center, this.colorHex, this.pullRadius * 0.5);
 
     for (const u of ctx.units) {
-      if (!u.alive) continue;
-      if (this.caster ? u === this.caster : u.team !== 'red') continue;
+      if (!u.alive || u === this.caster) continue;
+      const canHit = u.canTakeDamageFrom
+        ? u.canTakeDamageFrom(this.casterId, this.team)
+        : u.team !== this.team;
+      if (!canHit) continue;
       const horizDist = Math.hypot(center.x - u.group.position.x, center.z - u.group.position.z);
       if (horizDist <= this.pullRadius + u.radius) {
         this.captured.push({
@@ -713,7 +724,11 @@ export class LapseBlueProjectile extends Projectile {
     }
 
     for (const u of ctx.units) {
-      if (!u.alive || u.team !== 'red' || hit.has(u)) continue;
+      if (!u.alive || hit.has(u)) continue;
+      const canHit = u.canTakeDamageFrom
+        ? u.canTakeDamageFrom(this.casterId, this.team)
+        : u.team !== this.team;
+      if (!canHit) continue;
       if (Math.hypot(center.x - u.group.position.x, center.z - u.group.position.z) <= blastRadius + u.radius) {
         hit.add(u);
       }
@@ -1055,9 +1070,13 @@ export class HollowPurpleProjectile extends Projectile {
     ctx.applyPhysicsImpulse?.(this.mesh.position, 6.2, 62, 0.6, 220);
 
     if (!this.caster) {
-      // Player Hollow Purple: one-hit obliterates all enemy units within 4.2m
+      // Player Hollow Purple: one-hit obliterates all damageable units within 4.2m
       for (const u of ctx.units) {
-        if (!u.alive || u.team !== 'red' || this.hitUnits.has(u)) continue;
+        if (!u.alive || this.hitUnits.has(u)) continue;
+        const canHit = u.canTakeDamageFrom
+          ? u.canTakeDamageFrom(this.casterId, this.team)
+          : u.team !== this.team;
+        if (!canHit) continue;
         const unitCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.5, 0));
         if (unitCenter.distanceTo(this.mesh.position) <= 4.2 + u.radius) {
           this.hitUnits.add(u);
@@ -1229,7 +1248,11 @@ export class EmberInsectProjectile extends Projectile {
 
     let hitAny = false;
     for (const u of ctx.units) {
-      if (!u.alive || u.team === this.team) continue;
+      if (!u.alive) continue;
+      const canHit = u.canTakeDamageFrom
+        ? u.canTakeDamageFrom(this.casterId, this.team)
+        : u.team !== this.team;
+      if (!canHit) continue;
       const center = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
       const d = center.distanceTo(hitPos);
       if (u === directUnit || d <= this.splashRadius + u.radius) {
@@ -1598,7 +1621,11 @@ export class MaximumMeteorProjectile extends Projectile {
 
     let hitCount = 0;
     for (const u of ctx.units) {
-      if (!u.alive || u.team === this.team) continue;
+      if (!u.alive) continue;
+      const canHit = u.canTakeDamageFrom
+        ? u.canTakeDamageFrom(this.casterId, this.team)
+        : u.team !== this.team;
+      if (!canHit) continue;
       const dist = Math.hypot(u.group.position.x - center.x, u.group.position.z - center.z);
       if (dist <= this.blastRadius + u.radius) {
         hitCount++;

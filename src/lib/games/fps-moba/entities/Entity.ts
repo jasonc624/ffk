@@ -80,6 +80,17 @@ export abstract class MobaEntity<T extends string = MobaUnitType | 'BARRIER'> im
     this.isDestructable = val;
   }
 
+  /**
+   * Returns true if this entity can receive damage from `attackerId` on `attackerTeam`.
+   * Subclasses (e.g. ShikigamiEntity) override this so certain summons (like Mahoraga)
+   * can be damaged by anyone (even their summoner), while others (like Nue & Rabbit Escape)
+   * cannot be damaged by their caster.
+   */
+  public canTakeDamageFrom(attackerId: string, attackerTeam: MobaTeam): boolean {
+    if (!this.alive || !this.isDestructable) return false;
+    return attackerTeam !== this.team;
+  }
+
   takeDamage(amount: number): number {
     if (!this.isDestructable || !this.alive || amount <= 0) return 0;
     const taken = Math.min(this.hp, amount);
@@ -143,6 +154,7 @@ export class MobaUnitEntity extends MobaEntity<MobaUnitType> {
   verticalVel?: number;
   pullActiveTimer?: number;
   knockbackVel?: THREE.Vector3;
+  hpBarRevealTimer: number = 0;
 
   constructor(opts: {
     id: string;
@@ -239,6 +251,73 @@ export class MinionUnit extends MobaUnitEntity {
 export class StructureUnit extends MobaUnitEntity {
   constructor(opts: ConstructorParameters<typeof MobaUnitEntity>[0]) {
     super(opts);
+  }
+}
+
+/**
+ * Summoned Battlefield Construct (not a Shikigami — e.g. Jogo's wall-sticking Mini Volcanoes).
+ * Has its own destructible health pool and floating HP bar so enemies can destroy it early.
+ */
+export class MiniVolcanoUnit extends MobaUnitEntity {
+  readonly casterId: string;
+  readonly lavaMesh: THREE.Mesh;
+  readonly pos: THREE.Vector3;
+  readonly normal: THREE.Vector3;
+  readonly detectRadius: number;
+  age: number = 0;
+  readonly maxAge: number;
+  fireCooldown: number = 0.25;
+
+  constructor(opts: {
+    id: string;
+    team: MobaTeam;
+    casterId: string;
+    pos: THREE.Vector3;
+    normal: THREE.Vector3;
+    damage: number;
+    detectRadius: number;
+    durationMs: number;
+    group: THREE.Group;
+    coneMesh: THREE.Mesh;
+    lavaMesh: THREE.Mesh;
+    hpBarFill: THREE.Mesh;
+  }) {
+    super({
+      id: opts.id,
+      name: 'Mini Volcano',
+      team: opts.team,
+      type: 'CONSTRUCT',
+      maxHp: 110,
+      radius: 0.62,
+      height: 0.75,
+      group: opts.group,
+      bodyMesh: opts.coneMesh,
+      headMesh: opts.lavaMesh,
+      hitMeshes: [opts.coneMesh, opts.lavaMesh],
+      hpBarFill: opts.hpBarFill,
+      attackRange: 0,
+      attackDamage: opts.damage,
+      attackCooldown: 0.68,
+      moveSpeed: 0,
+      goldValue: 15,
+      xpValue: 10,
+      isDestructable: true
+    });
+    this.casterId = opts.casterId;
+    this.lavaMesh = opts.lavaMesh;
+    this.pos = opts.pos.clone();
+    this.normal = opts.normal.clone().normalize();
+    this.detectRadius = opts.detectRadius;
+    this.maxAge = opts.durationMs / 1000;
+    opts.coneMesh.userData.unit = this;
+    opts.lavaMesh.userData.unit = this;
+  }
+
+  public override canTakeDamageFrom(attackerId: string, attackerTeam: MobaTeam): boolean {
+    if (!this.alive || !this.isDestructable) return false;
+    // Cannot be damaged by its own caster, but can be destroyed by any enemy or rogue unit
+    if (attackerId === this.casterId) return false;
+    return attackerTeam !== this.team;
   }
 }
 

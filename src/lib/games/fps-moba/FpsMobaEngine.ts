@@ -40,6 +40,7 @@ import {
   HeroUnit,
   MinionUnit,
   StructureUnit,
+  MiniVolcanoUnit,
   DomainBarrierEntity,
   type NpcAiState
 } from './entities/Entity';
@@ -129,6 +130,7 @@ export interface MobaUnit {
   verticalVel?: number;
   pullActiveTimer?: number;
   knockbackVel?: THREE.Vector3;
+  hpBarRevealTimer?: number;
 }
 
 interface Active3DVfx {
@@ -266,19 +268,8 @@ export class FpsMobaEngine {
   private uroActionAnimHint: HeroAnimHint = 'idle';
   private isSkyHovering = false;
   private skyDeflectCounterCooldown = 0;
-  private activeVolcanoes: Array<{
-    group: THREE.Group;
-    lavaMesh: THREE.Mesh;
-    pos: THREE.Vector3;
-    normal: THREE.Vector3;
-    team: MobaTeam;
-    casterId: string;
-    damage: number;
-    radius: number;
-    age: number;
-    maxAge: number;
-    fireCooldown: number;
-  }> = [];
+  private activeVolcanoes: MiniVolcanoUnit[] = [];
+  private volcanoIdCounter = 1;
   private meteorAiming = false;
   private meteorTarget = new THREE.Vector3();
   private meteorMarker: THREE.Group | null = null;
@@ -291,6 +282,9 @@ export class FpsMobaEngine {
   private nueCarryDelaySec = 0;
   private nueCarryTimer = 0;
   private rabbitLaunchBoostTimer = 0;
+  private isHoldingRabbitEscape = false;
+  private rabbitHoldElapsedSec = 0;
+  private rabbitHoldSpawnAccSec = 0;
   private activeNueCarry: NueCarryShikigami | null = null;
 
   // Input state
@@ -306,6 +300,11 @@ export class FpsMobaEngine {
   private popupCounter = 1;
   private hitMarkerAlpha = 0;
   private hitMarkerCrit = false;
+  private readonly hpBarFrustum = new THREE.Frustum();
+  private readonly hpBarProjScreenMat = new THREE.Matrix4();
+  private readonly hpBarLosRay = new THREE.Raycaster();
+  private readonly hpBarWorldPos = new THREE.Vector3();
+  private readonly hpBarUpperPos = new THREE.Vector3();
 
   // Timers
   private clock = new THREE.Clock();
@@ -386,6 +385,7 @@ export class FpsMobaEngine {
         this.cancelBlueCharge();
         this.cancelTeleport();
         this.cancelMeteorAim();
+        this.finishHoldingRabbitEscape();
         this.endNueCarry();
         this.stopAllAudio();
       } else {
@@ -731,6 +731,7 @@ export class FpsMobaEngine {
     });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 0.48), mat);
     mesh.position.y = y;
+    mesh.visible = false; // Hidden by default until Overwatch visibility & LoS triggers are met
     parent.add(mesh);
     return mesh;
   }
@@ -796,10 +797,11 @@ export class FpsMobaEngine {
     });
   }
 
-  private createFloatingHpBar(parent: THREE.Group, y: number, width: number, team: MobaTeam): THREE.Mesh {
+  private createFloatingHpBar(parent: THREE.Group, y: number, width: number, _team: MobaTeam): THREE.Mesh {
     const barGroup = new THREE.Group();
     barGroup.position.set(0, y, 0);
     barGroup.userData.isHpBarRoot = true;
+    barGroup.visible = false; // Hidden by default until Overwatch visibility & LoS triggers are met
     parent.add(barGroup);
 
     const bgGeo = new THREE.PlaneGeometry(width, 0.18);
@@ -809,13 +811,89 @@ export class FpsMobaEngine {
 
     const fillGeo = new THREE.PlaneGeometry(width * 0.96, 0.12);
     const fillMat = new THREE.MeshBasicMaterial({
-      color: team === 'blue' ? 0x38bdf8 : 0xf43f5e,
+      color: 0xffffff, // 80-100%: White, 50-79%: Yellow, 1-49%: Red
       side: THREE.DoubleSide
     });
     const fillMesh = new THREE.Mesh(fillGeo, fillMat);
     fillMesh.position.z = 0.015;
     barGroup.add(fillMesh);
     return fillMesh;
+  }
+
+  /**
+   * Overwatch-style Floating Health Bar & Nameplate Visibility Rules:
+   * 1. Core Visibility Triggers:
+   *    - Damage-dealt window: Damaging a target reveals their health bar for 3.6 seconds (refreshing on subsequent hits).
+   *    - Low-health visibility: Automatically reveals targets below 45% HP so finishable targets can be spotted.
+   *    - Character/ability exceptions: Megumi's Divine Dog scent passive reveals wounded enemies (<= 65% HP within 55m),
+   *      and active Domain Expansions reveal trapped targets inside the barrier.
+   * 2. Occlusion & Spatial Rules:
+   *    - Camera Frustum: Only renders when the floating bar anchor is inside the player camera's view frustum.
+   *    - Line of Sight (LoS) & Geometry: Raycasts from the camera to the bar anchor and upper character bounds against
+   *      world obstacles so solid walls occlude bars (unless low cover/stairs expose the bar anchor or upper bounds).
+   */
+  private shouldRenderUnitHealthBar(
+    u: MobaUnit,
+    barAnchorWorld: THREE.Vector3,
+    hasTrackingShikigami: boolean
+  ): boolean {
+    if (!u.alive) return false;
+
+    const hpRatio = u.hp / Math.max(1, u.maxHp);
+    const recentlyDamaged = (u.hpBarRevealTimer ?? 0) > 0;
+    const isLowHealth = hpRatio <= 0.45 && u.hp < u.maxHp;
+    const isDivineDogTracked =
+      hasTrackingShikigami &&
+      u.team === 'red' &&
+      hpRatio <= 0.65 &&
+      u.group.position.distanceTo(this.playerPos) <= 55;
+    const isDomainTrapped = this.activeDomains.some(
+      (d) => d.casterId === 'player' && d.isTrapped(u.id)
+    );
+    const isAlliedInjured = u.team === 'blue' && u.hp < u.maxHp;
+
+    const triggerActive =
+      recentlyDamaged ||
+      isLowHealth ||
+      isDivineDogTracked ||
+      isDomainTrapped ||
+      isAlliedInjured;
+
+    if (!triggerActive) return false;
+
+    // 1. Camera View Frustum Check
+    if (!this.hpBarFrustum.containsPoint(barAnchorWorld)) {
+      return false;
+    }
+
+    const camPos = this.camera.position;
+    const distToAnchor = camPos.distanceTo(barAnchorWorld);
+    if (distToAnchor > 72) return false;
+    if (distToAnchor < 0.6) return true;
+
+    // 2. Line of Sight (LoS) Check against solid walls/geometry:
+    // Visible if either the floating bar anchor OR the character's upper bounds clears low cover/ledges.
+    const checkPointClear = (pt: THREE.Vector3): boolean => {
+      const dir = pt.clone().sub(camPos);
+      const dist = dir.length();
+      if (dist <= 0.4) return true;
+      dir.divideScalar(dist);
+      this.hpBarLosRay.set(camPos, dir);
+      this.hpBarLosRay.near = 0.25;
+      this.hpBarLosRay.far = Math.max(0.3, dist - 0.35);
+      return (
+        this.hpBarLosRay.intersectObjects(this.mapBuilder.raycastObstacles, false).length === 0
+      );
+    };
+
+    if (checkPointClear(barAnchorWorld)) return true;
+
+    this.hpBarUpperPos.set(
+      u.group.position.x,
+      u.group.position.y + u.height * 0.78,
+      u.group.position.z
+    );
+    return checkPointClear(this.hpBarUpperPos);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -1205,6 +1283,7 @@ export class FpsMobaEngine {
 
   // ─────────────────────────────────────────────────────────────
   //  Jogo Ability E: Wall-Sticking Mini Volcanoes (180° frontal firing hemisphere)
+  //  Not a Shikigami, but a destructible battlefield construct with its own health bar.
   // ─────────────────────────────────────────────────────────────
   private plantMiniVolcano(
     pos: THREE.Vector3,
@@ -1216,12 +1295,15 @@ export class FpsMobaEngine {
     durationMs: number
   ) {
     // Cap active volcanoes per caster to 3 (despawn oldest cleanly)
-    const owned = this.activeVolcanoes.filter((v) => v.casterId === casterId);
+    const owned = this.activeVolcanoes.filter((v) => v.alive && v.casterId === casterId);
     if (owned.length >= 3) {
       const oldest = owned[0];
+      oldest.alive = false;
       this.scene.remove(oldest.group);
-      const idx = this.activeVolcanoes.indexOf(oldest);
-      if (idx !== -1) this.activeVolcanoes.splice(idx, 1);
+      const vIdx = this.activeVolcanoes.indexOf(oldest);
+      if (vIdx !== -1) this.activeVolcanoes.splice(vIdx, 1);
+      const uIdx = this.units.indexOf(oldest);
+      if (uIdx !== -1) this.units.splice(uIdx, 1);
     }
 
     const group = new THREE.Group();
@@ -1258,31 +1340,45 @@ export class FpsMobaEngine {
     lavaMesh.position.y = 0.54;
     group.add(lavaMesh);
 
-    this.scene.add(group);
-    this.activeVolcanoes.push({
-      group,
-      lavaMesh,
-      pos: pos.clone(),
-      normal: normal.clone().normalize(),
+    const hpBarFill = this.createFloatingHpBar(group, 1.05, 0.85, team);
+
+    const volcanoUnit = new MiniVolcanoUnit({
+      id: `mini_volcano_${this.volcanoIdCounter++}`,
       team,
       casterId,
+      pos: pos.clone(),
+      normal: normal.clone().normalize(),
       damage,
-      radius,
-      age: 0,
-      maxAge: durationMs / 1000,
-      fireCooldown: 0.25
+      detectRadius: radius,
+      durationMs,
+      group,
+      coneMesh: cone,
+      lavaMesh,
+      hpBarFill
     });
+
+    this.scene.add(group);
+    this.activeVolcanoes.push(volcanoUnit);
+    this.units.push(volcanoUnit);
   }
 
   private updateVolcanoes(dt: number, elapsed: number) {
     const losRay = new THREE.Raycaster();
     for (let i = this.activeVolcanoes.length - 1; i >= 0; i--) {
       const v = this.activeVolcanoes[i];
+      if (!v.alive) {
+        this.scene.remove(v.group);
+        this.activeVolcanoes.splice(i, 1);
+        continue;
+      }
       v.age += dt;
       if (v.age >= v.maxAge) {
+        v.alive = false;
         this.spawnCursedBurst(v.pos.clone().addScaledVector(v.normal, 0.4), 'FIRE', 1.1, 24);
         this.scene.remove(v.group);
         this.activeVolcanoes.splice(i, 1);
+        const uIdx = this.units.indexOf(v);
+        if (uIdx !== -1) this.units.splice(uIdx, 1);
         continue;
       }
 
@@ -1295,10 +1391,10 @@ export class FpsMobaEngine {
       // Scan for nearest enemy inside the volcano's 180° hemisphere (dot(toTarget, normal) >= 0)
       const nozzlePos = v.pos.clone().addScaledVector(v.normal, 0.65);
       let bestTargetPos: THREE.Vector3 | null = null;
-      let bestDist = v.radius;
+      let bestDist = v.detectRadius;
 
       for (const u of this.units) {
-        if (!u.alive || u.team === v.team) continue;
+        if (!u.alive || u === v || !this.canUnitTakeDamageFrom(u, v.casterId, v.team)) continue;
         const targetCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
         const toTarget = targetCenter.clone().sub(v.pos);
         const dist = toTarget.length();
@@ -1324,16 +1420,31 @@ export class FpsMobaEngine {
         bestTargetPos = targetCenter;
       }
 
+      // Also allow enemy NPC volcanoes to fire at the player if inside the 180° hemisphere
+      if (
+        v.team !== 'blue' &&
+        this.playerRespawnTimer <= 0 &&
+        this.shadowStepTimer <= 0
+      ) {
+        const playerCenter = this.playerPos.clone().add(new THREE.Vector3(0, 1.15, 0));
+        const toPlayer = playerCenter.clone().sub(v.pos);
+        const distP = toPlayer.length();
+        if (distP <= bestDist && distP >= 0.2 && toPlayer.clone().divideScalar(distP).dot(v.normal) >= 0) {
+          bestDist = distP;
+          bestTargetPos = playerCenter;
+        }
+      }
+
       if (bestTargetPos) {
         v.fireCooldown = 0.68;
         const shootDir = bestTargetPos.clone().sub(nozzlePos).normalize();
         const bolt = new FireBoltProjectile({
           startPos: nozzlePos,
           forward: shootDir,
-          damage: v.damage,
+          damage: v.attackDamage,
           team: v.team,
           casterId: v.casterId,
-          casterName: this.hero.name
+          casterName: 'Mini Volcano'
         });
         this.scene.add(bolt.mesh);
         this.projectiles.push(bolt);
@@ -1402,6 +1513,8 @@ export class FpsMobaEngine {
       scene: this.scene,
       units: this.units,
       playerPos: this.playerPos,
+      playerHp: this.playerRespawnTimer <= 0 ? this.hp : 0,
+      playerMana: this.playerRespawnTimer <= 0 ? this.mana : 0,
       playerDetectable: this.playerRespawnTimer <= 0 && this.shadowStepTimer <= 0,
       damageUnit: (unit, amount, isCrit, sourceName, hitPos, customLabel) =>
         this.damageUnit(unit as MobaUnit, amount, isCrit, sourceName, hitPos, customLabel),
@@ -1476,10 +1589,9 @@ export class FpsMobaEngine {
     }
   }
 
-  private summonRabbitEscape() {
+  private spawnRabbitEscapeBatch(spawnCount: number) {
     const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
-    const spawnCount = inShadowGarden ? 18 : 10;
-    const maxRabbits = inShadowGarden ? 24 : 14;
+    const maxRabbits = inShadowGarden ? 28 : 18;
 
     const existingRabbits = this.units.filter(
       (u): u is RabbitEscapeShikigami =>
@@ -1496,24 +1608,12 @@ export class FpsMobaEngine {
     }
 
     const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
-    this.shield = Math.min(200, this.shield + 15);
-    // High upward launch + sustained upward momentum window so Megumi can choose when to invoke Nue
-    this.playerVel.y = 24.5;
-    this.playerVel.x += flatForward.x * 4.0;
-    this.playerVel.z += flatForward.z * 4.0;
-    this.grounded = false;
-    this.rabbitLaunchBoostTimer = 0.65;
-    this.nueCarryAvailable = true;
-    this.nueCarryDelaySec = 0.22;
-
-    this.spawnImpactRing(this.playerPos.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 5.2);
-    this.spawnCursedBurst(this.playerPos.clone().add(new THREE.Vector3(0, 0.7, 0)), 'SHADOW', 2.6, 60);
 
     for (let i = 0; i < spawnCount; i++) {
-      const angle = (i / spawnCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
-      const dist = 1.4 + Math.random() * 2.4;
-      const rawX = this.playerPos.x + Math.cos(angle) * dist + flatForward.x * 1.1;
-      const rawZ = this.playerPos.z + Math.sin(angle) * dist + flatForward.z * 1.1;
+      const angle = (i / Math.max(1, spawnCount)) * Math.PI * 2 + Math.random() * 0.85;
+      const dist = 1.2 + Math.random() * 2.4;
+      const rawX = this.playerPos.x + Math.cos(angle) * dist + flatForward.x * 1.0;
+      const rawZ = this.playerPos.z + Math.sin(angle) * dist + flatForward.z * 1.0;
       const resolved = this.mapBuilder.resolveHorizontalCollision(rawX, rawZ, 0.42, this.playerPos.y);
       const spawnPos = new THREE.Vector3(
         resolved.x,
@@ -1532,6 +1632,54 @@ export class FpsMobaEngine {
       this.scene.add(rabbit.group);
       this.units.push(rabbit);
     }
+  }
+
+  private beginHoldingRabbitEscape() {
+    if (this.isHoldingRabbitEscape) return;
+    const sec = this.hero.secondaryFire;
+    if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
+    this.exitShadowStep();
+
+    // Base activation cost; holding M2 continues draining Cursed Energy and spawning more rabbits while climbing higher
+    this.consumeCursedEnergy(sec.manaCost ?? 12);
+    this.viewModel.triggerCastGesture();
+
+    this.isHoldingRabbitEscape = true;
+    this.rabbitHoldElapsedSec = 0;
+    this.rabbitHoldSpawnAccSec = 0;
+
+    const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
+    const initialCount = inShadowGarden ? 6 : 4;
+    this.spawnRabbitEscapeBatch(initialCount);
+
+    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    this.shield = Math.min(200, this.shield + 15);
+    // Initial lift; holding M2 continues propelling Megumi higher!
+    this.playerVel.y = 14.5;
+    this.playerVel.x += flatForward.x * 3.5;
+    this.playerVel.z += flatForward.z * 3.5;
+    this.grounded = false;
+    this.rabbitLaunchBoostTimer = 0.65;
+    this.nueCarryAvailable = true;
+    this.nueCarryDelaySec = 0.22;
+
+    this.spawnImpactRing(this.playerPos.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 4.6);
+    this.spawnCursedBurst(this.playerPos.clone().add(new THREE.Vector3(0, 0.7, 0)), 'SHADOW', 2.2, 45);
+  }
+
+  private finishHoldingRabbitEscape() {
+    if (!this.isHoldingRabbitEscape) return;
+    this.isHoldingRabbitEscape = false;
+    this.rabbitHoldElapsedSec = 0;
+    this.rabbitHoldSpawnAccSec = 0;
+    const sec = this.hero.secondaryFire;
+    const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
+    this.secondaryCooldownMs = inShadowGarden ? 2500 : (sec.cooldownMs ?? 6500);
+  }
+
+  private summonRabbitEscape() {
+    this.beginHoldingRabbitEscape();
+    this.finishHoldingRabbitEscape();
   }
 
   private startNueCarry() {
@@ -1827,6 +1975,7 @@ export class FpsMobaEngine {
     } else if (e.button === 2) {
       this.rightMouseDown = false;
       this.finishDrawingRealityWipe();
+      this.finishHoldingRabbitEscape();
       if (this.isChargingPunch) {
         this.releaseChargedPunch();
       }
@@ -2114,13 +2263,7 @@ export class FpsMobaEngine {
     }
 
     if (sec.kind === 'RABBIT_ESCAPE') {
-      if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
-      this.exitShadowStep();
-      this.consumeCursedEnergy(sec.manaCost ?? 22);
-      const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
-      this.secondaryCooldownMs = inShadowGarden ? 2500 : (sec.cooldownMs ?? 6500);
-      this.viewModel.triggerCastGesture();
-      this.summonRabbitEscape();
+      this.beginHoldingRabbitEscape();
       return;
     }
 
@@ -2272,7 +2415,7 @@ export class FpsMobaEngine {
       this.playerPos.z = resolved.z;
 
       for (const u of this.units) {
-        if (!u.alive || u.team !== 'red' || hitSet.has(u)) continue;
+        if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue') || hitSet.has(u)) continue;
         if (u.group.position.distanceTo(this.playerPos) <= 2.8 + u.radius) {
           hitSet.add(u);
           this.grantAbilityPassive(true);
@@ -2378,7 +2521,7 @@ export class FpsMobaEngine {
       const minCos = Math.cos(THREE.MathUtils.degToRad((wep.cleaveArcDeg ?? 115) * 0.5));
       let closeEnemy = false;
       for (const u of this.units) {
-        if (!u.alive || u.team !== 'red') continue;
+        if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
         const toU = u.group.position.clone().sub(this.playerPos);
         toU.y = 0;
         const d = toU.length();
@@ -2563,7 +2706,7 @@ export class FpsMobaEngine {
         const hit = hits[0];
         endPoint = hit.point;
         const unit = hit.object.userData.unit as MobaUnit | undefined;
-        if (unit && unit.alive && unit.team === 'red') {
+        if (unit && unit.alive && this.canUnitTakeDamageFrom(unit, 'player', 'blue')) {
           const isHeadshot = Boolean(hit.object.userData.isHead);
           const dmg = Math.round((shotBaseDamage + (this.level - 1) * 2.5) * (isHeadshot ? 1.6 : 1.0));
           if (isHeadshot && this.hero.id === 'vex') {
@@ -2697,7 +2840,7 @@ export class FpsMobaEngine {
 
     let hitAny = false;
     for (const u of this.units) {
-      if (!u.alive || u.team !== 'red') continue;
+      if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
       const toUnit = u.group.position.clone().sub(this.playerPos);
       toUnit.y = 0;
       const dist = toUnit.length();
@@ -2764,11 +2907,20 @@ export class FpsMobaEngine {
     }
   }
 
-  /** Collects raycastable target meshes for all living enemy units. */
+  /** Checks whether `unit` can take damage from `attackerId` on `attackerTeam` (respecting Shikigami/Construct rules). */
+  private canUnitTakeDamageFrom(unit: MobaUnit, attackerId: string, attackerTeam: MobaTeam): boolean {
+    if (!unit.alive || unit.isDestructable === false) return false;
+    if (unit instanceof MobaEntity) {
+      return unit.canTakeDamageFrom(attackerId, attackerTeam);
+    }
+    return unit.team !== attackerTeam;
+  }
+
+  /** Collects raycastable target meshes for all living units that the player can damage (including Mahoraga & enemy constructs). */
   private getEnemyHitMeshes(): THREE.Object3D[] {
     const meshes: THREE.Object3D[] = [];
     for (const u of this.units) {
-      if (u.alive && u.team === 'red') {
+      if (u.alive && this.canUnitTakeDamageFrom(u, 'player', 'blue')) {
         if (u.hitMeshes && u.hitMeshes.length > 0) {
           meshes.push(...u.hitMeshes);
         } else {
@@ -2956,7 +3108,7 @@ export class FpsMobaEngine {
           this.playerPos.z = resolved.z;
 
           for (const u of this.units) {
-            if (!u.alive || u.team !== 'red' || hitUnits.has(u)) continue;
+            if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue') || hitUnits.has(u)) continue;
             if (u.group.position.distanceTo(this.playerPos) <= 3.2 + u.radius) {
               hitUnits.add(u);
               this.grantAbilityPassive(true);
@@ -2995,7 +3147,7 @@ export class FpsMobaEngine {
           onUpdate: (dt) => {
             waveMesh.position.addScaledVector(waveVel, dt);
             for (const u of this.units) {
-              if (!u.alive || u.team !== 'red' || pierced.has(u)) continue;
+              if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue') || pierced.has(u)) continue;
               const unitCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.5, 0));
               if (unitCenter.distanceTo(waveMesh.position) <= ab.radius + u.radius) {
                 pierced.add(u);
@@ -3023,7 +3175,7 @@ export class FpsMobaEngine {
 
         const minCos = Math.cos(THREE.MathUtils.degToRad(45));
         for (const u of this.units) {
-          if (!u.alive || u.team !== 'red') continue;
+          if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
           const toU = u.group.position.clone().sub(origin);
           toU.y = 0;
           const d = toU.length();
@@ -3228,7 +3380,7 @@ export class FpsMobaEngine {
         let bestUnit: MobaUnit | null = null;
         let bestDist = ab.radius;
         for (const u of this.units) {
-          if (!u.alive || u.team !== 'red') continue;
+          if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
           const d = u.group.position.distanceTo(this.playerPos);
           if (d < bestDist) {
             bestDist = d;
@@ -3356,7 +3508,7 @@ export class FpsMobaEngine {
     const slamDmg = Math.round((baseDmg + 25 + (this.level - 1) * 8) * (inDomain ? 1.25 : 1.0));
     let anyHit = false;
     for (const u of this.units) {
-      if (!u.alive || u.team !== 'red') continue;
+      if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
       const dx = u.group.position.x - impactPos.x;
       const dz = u.group.position.z - impactPos.z;
       const horizDist = Math.hypot(dx, dz);
@@ -3462,7 +3614,7 @@ export class FpsMobaEngine {
     const segLenSq = Math.max(0.0001, segVec.lengthSq());
 
     for (const u of this.units) {
-      if (!u.alive || u.team !== 'red') continue;
+      if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
       const uCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
       const t = THREE.MathUtils.clamp(uCenter.clone().sub(beamOrigin).dot(segVec) / segLenSq, 0, 1);
       const closestPt = beamOrigin.clone().addScaledVector(segVec, t);
@@ -3514,7 +3666,7 @@ export class FpsMobaEngine {
     const dmg = Math.round(240 + (this.level - 1) * 14);
     let anyHit = false;
     for (const u of this.units) {
-      if (!u.alive || u.team !== 'red') continue;
+      if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
       const uCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.5, 0));
       const d = Math.hypot(u.group.position.x - targetPt.x, u.group.position.z - targetPt.z);
       if (d <= shatterRadius + u.radius) {
@@ -3849,7 +4001,7 @@ export class FpsMobaEngine {
   ): number {
     let hitCount = 0;
     for (const u of this.units) {
-      if (!u.alive || u.team !== 'red') continue;
+      if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
       const dist = u.group.position.distanceTo(center);
       if (dist <= radius + u.radius) {
         hitCount++;
@@ -3954,6 +4106,8 @@ export class FpsMobaEngine {
 
     unit.hp = Math.max(0, unit.hp - finalAmount);
     unit.outOfCombatTimer = 5.0;
+    // Overwatch damage-dealt window: reveal target's health bar for 3.6 seconds, refreshing on subsequent hits
+    unit.hpBarRevealTimer = 3.6;
 
     this.hitMarkerAlpha = 1.0;
     this.hitMarkerCrit = isCrit;
@@ -4636,7 +4790,12 @@ export class FpsMobaEngine {
         // Restore a small spark of Cursed Energy once the exhaustion lockout expires
         this.mana = Math.min(this.maxMana, 15);
       }
-    } else if (!this.isBarrierActive() && !this.isChargingPrimary && !this.isChargingPunch) {
+    } else if (
+      !this.isBarrierActive() &&
+      !this.isChargingPrimary &&
+      !this.isChargingPunch &&
+      !this.isHoldingRabbitEscape
+    ) {
       this.mana = Math.min(this.maxMana, this.mana + this.getCeRegenPerSec() * dt);
     }
 
@@ -4872,8 +5031,55 @@ export class FpsMobaEngine {
       this.nueCarryDelaySec = Math.max(0, this.nueCarryDelaySec - dt);
     }
 
+    if (this.isHoldingRabbitEscape) {
+      const maxHoldSec = 1.45;
+      if (
+        !this.rightMouseDown ||
+        !this.canSpendCursedEnergy() ||
+        this.playerRespawnTimer > 0 ||
+        this.winner ||
+        this.teleportPhase !== 'NONE'
+      ) {
+        this.finishHoldingRabbitEscape();
+      } else {
+        this.rabbitHoldElapsedSec += dt;
+        this.rabbitHoldSpawnAccSec += dt;
+
+        // Continuously deplete Cursed Energy while holding M2
+        const drainPerSec = this.hero.secondaryFire.manaDrainPerSec ?? 22;
+        this.consumeCursedEnergy(drainPerSec * dt);
+
+        // Propel Megumi steadily higher the longer M2 is held!
+        const climbProgress = Math.min(1, this.rabbitHoldElapsedSec / maxHoldSec);
+        const targetClimbVelY = THREE.MathUtils.lerp(15.5, 22.5, climbProgress);
+        this.playerVel.y = Math.max(this.playerVel.y, targetClimbVelY);
+        this.grounded = false;
+        this.rabbitLaunchBoostTimer = 0.55;
+        this.nueCarryAvailable = true;
+
+        // Spawn additional waves of persistent 20-HP rabbits every 0.14s while M2 is held
+        const spawnInterval = 0.14;
+        if (this.rabbitHoldSpawnAccSec >= spawnInterval) {
+          this.rabbitHoldSpawnAccSec -= spawnInterval;
+          const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
+          this.spawnRabbitEscapeBatch(inShadowGarden ? 3 : 2);
+          this.spawnCursedBurst(
+            this.playerPos.clone().add(new THREE.Vector3(0, 0.3, 0)),
+            'SHADOW',
+            1.4,
+            18
+          );
+        }
+
+        if (this.rabbitHoldElapsedSec >= maxHoldSec || !this.canSpendCursedEnergy()) {
+          this.finishHoldingRabbitEscape();
+        }
+      }
+    }
+
     if (
       this.nueCarryAvailable &&
+      !this.isHoldingRabbitEscape &&
       this.nueCarryDelaySec <= 0 &&
       !this.grounded &&
       this.keys.has('Space') &&
@@ -4914,7 +5120,7 @@ export class FpsMobaEngine {
     }
 
     this.isSkyHovering = false;
-    if (!isNueCarrying && !isSkyPulling && !this.uroAerialSlamActive) {
+    if (!isNueCarrying && !isSkyPulling && !this.uroAerialSlamActive && !this.isHoldingRabbitEscape) {
       if (this.keys.has('Space') && this.grounded && this.teleportPhase === 'NONE' && !this.meteorAiming) {
         this.playerVel.y = this.hero.id === 'uro' ? 13.5 : 11.2;
         this.grounded = false;
@@ -5146,6 +5352,20 @@ export class FpsMobaEngine {
   }
 
   private updateMobaUnits(dt: number, elapsed: number) {
+    this.camera.updateMatrixWorld();
+    this.hpBarProjScreenMat.multiplyMatrices(
+      this.camera.projectionMatrix,
+      this.camera.matrixWorldInverse
+    );
+    this.hpBarFrustum.setFromProjectionMatrix(this.hpBarProjScreenMat);
+    const hasTrackingShikigami = this.units.some(
+      (u) =>
+        u.alive &&
+        u instanceof ShikigamiEntity &&
+        u.tracksLowHpThroughWalls &&
+        u.team === 'blue'
+    );
+
     for (let i = this.units.length - 1; i >= 0; i--) {
       const u = this.units[i];
 
@@ -5156,6 +5376,7 @@ export class FpsMobaEngine {
           if (u.respawnTimer <= 0 && u.spawnPos) {
             u.alive = true;
             u.hp = u.maxHp;
+            u.hpBarRevealTimer = 0;
             u.group.position.copy(u.spawnPos);
             u.group.visible = true;
             if (u.npcAi) {
@@ -5165,18 +5386,47 @@ export class FpsMobaEngine {
               u.npcAi.cd = { red: 2, blue: 4, shift: 1, infinity: 3, domain: 2.0 };
             }
           }
-        } else if (u.type === 'MINION' || u.type === 'SHIKIGAMI') {
+        } else if (u.type === 'MINION' || u.type === 'SHIKIGAMI' || u.type === 'CONSTRUCT') {
           this.units.splice(i, 1);
         }
         continue;
       }
 
+      if (u.hpBarRevealTimer && u.hpBarRevealTimer > 0) {
+        u.hpBarRevealTimer = Math.max(0, u.hpBarRevealTimer - dt);
+      }
+
       const hpRatio = Math.max(0.001, u.hp / u.maxHp);
       u.hpBarFill.scale.x = hpRatio;
+      const fillMat = u.hpBarFill.material as THREE.MeshBasicMaterial;
+      if (fillMat && fillMat.color) {
+        // 80–100%: White (0xffffff), 50–79%: Yellow (0xfacc15), 1–49%: Red (0xef4444)
+        const hpPct = Math.round(hpRatio * 100);
+        fillMat.color.setHex(hpPct >= 80 ? 0xffffff : hpPct >= 50 ? 0xfacc15 : 0xef4444);
+      }
       const hpBarTarget = u.hpBarFill.parent?.userData.isHpBarRoot ? u.hpBarFill.parent : u.hpBarFill;
-      hpBarTarget.lookAt(this.camera.position);
+      this.hpBarWorldPos.set(
+        u.group.position.x,
+        u.group.position.y + hpBarTarget.position.y,
+        u.group.position.z
+      );
+      const showHpBar = this.shouldRenderUnitHealthBar(
+        u,
+        this.hpBarWorldPos,
+        hasTrackingShikigami
+      );
+      hpBarTarget.visible = showHpBar;
+      if (showHpBar) {
+        hpBarTarget.lookAt(this.camera.position);
+      }
       if (u.nameplateMesh) {
-        u.nameplateMesh.lookAt(this.camera.position);
+        u.nameplateMesh.visible = showHpBar;
+        if (showHpBar) {
+          u.nameplateMesh.lookAt(this.camera.position);
+        }
+      }
+      if (u.type === 'CONSTRUCT') {
+        continue;
       }
       if (u.headMesh && (u.type === 'TOWER' || u.type === 'CORE')) {
         u.headMesh.rotation.y = elapsed * 1.8;
@@ -5379,7 +5629,10 @@ export class FpsMobaEngine {
         }
       }
 
-      const isMovingUnit = u.moveSpeed > 0 && bestDist > u.attackRange * 0.85;
+      const isMovingUnit =
+        u.moveSpeed > 0 &&
+        bestDist > u.attackRange * 0.85 &&
+        !(u instanceof MahoragaShikigami && !u.canMoveNow());
       u.animateRig?.(elapsed, isMovingUnit, false);
 
       if (isMovingUnit) {
@@ -5398,22 +5651,51 @@ export class FpsMobaEngine {
             dir.normalize();
           }
           const inDomainSlow = this.getDomainSlowMultiplier(u);
-          u.group.position.addScaledVector(dir, u.moveSpeed * inDomainSlow * dt);
+          const nextX = u.group.position.x + dir.x * u.moveSpeed * inDomainSlow * dt;
+          const nextZ = u.group.position.z + dir.z * u.moveSpeed * inDomainSlow * dt;
+          if (isShikigami) {
+            const res = this.mapBuilder.resolveHorizontalCollision(
+              nextX,
+              nextZ,
+              u.radius,
+              u.group.position.y
+            );
+            u.group.position.x = res.x;
+            u.group.position.z = res.z;
+          } else {
+            u.group.position.x = nextX;
+            u.group.position.z = nextZ;
+          }
           this.clampUnitToDomainBarrier(u);
           if (u.type === 'HERO' || isShikigami) {
             this.rotateUnitToward(u, dir.x, dir.z, dt);
           }
         }
       } else {
+        if ((u.type === 'HERO' || isShikigami) && (targetIsPlayer || bestTargetUnit)) {
+          const faceGoal = targetIsPlayer
+            ? this.playerPos
+            : bestTargetUnit!.group.position;
+          const fdx = faceGoal.x - u.group.position.x;
+          const fdz = faceGoal.z - u.group.position.z;
+          if (fdx * fdx + fdz * fdz > 0.01) {
+            this.rotateUnitToward(u, fdx, fdz, dt);
+          }
+        }
         this.clampUnitToDomainBarrier(u);
       }
 
       u.attackTimer -= dt;
-      const canUnitAttack = this.aiAttackingEnabled || isShikigami;
+      const canUnitAttack =
+        (this.aiAttackingEnabled || isShikigami) &&
+        !(u instanceof MahoragaShikigami && !u.canMoveNow());
       if (canUnitAttack && u.attackTimer <= 0 && bestDist <= u.attackRange) {
         u.attackTimer = u.attackCooldown;
         const origin = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.75, 0));
         const beamCol = isShikigami ? u.beamColor : u.team === 'blue' ? '#38bdf8' : '#f43f5e';
+        const mahoragaAtk =
+          u instanceof MahoragaShikigami ? u.triggerNextCombatAttack() : null;
+        const attackSourceLabel = mahoragaAtk ? mahoragaAtk.attackName : u.name;
 
         if (targetIsPlayer) {
           const dom = this.activeDomain;
@@ -5435,24 +5717,75 @@ export class FpsMobaEngine {
             }
           } else {
             const playerChest = this.playerPos.clone().add(new THREE.Vector3(0, 1.2, 0));
-            this.spawnBeamTracer(origin, playerChest, beamCol, 0.18, 0.06);
-            this.applyDamageToPlayer(u.attackDamage, u.name, u.team);
+            if (mahoragaAtk) {
+              this.spawnMeleeArcVfx(
+                origin.clone().lerp(playerChest, 0.55),
+                mahoragaAtk.isKick ? 3.2 : 3.8,
+                '#facc15'
+              );
+            } else {
+              this.spawnBeamTracer(origin, playerChest, beamCol, 0.18, 0.06);
+            }
+            if (u instanceof MahoragaShikigami) {
+              u.notifyAttackLanded();
+            }
+            this.applyDamageToPlayer(u.attackDamage, attackSourceLabel, u.team);
+            if (mahoragaAtk?.isKick) {
+              const kickDir = this.playerPos.clone().sub(u.group.position);
+              kickDir.y = 0;
+              if (kickDir.lengthSq() > 0.01) {
+                kickDir.normalize();
+                this.playerVel.x += kickDir.x * 14.0;
+                this.playerVel.z += kickDir.z * 14.0;
+                this.playerVel.y = Math.max(this.playerVel.y, 7.5);
+                this.grounded = false;
+              }
+            }
           }
         } else if (bestTargetUnit) {
           const targetCenter = bestTargetUnit.group.position
             .clone()
             .add(new THREE.Vector3(0, bestTargetUnit.height * 0.65, 0));
-          this.spawnBeamTracer(origin, targetCenter, beamCol, 0.16, 0.05);
+          if (mahoragaAtk) {
+            this.spawnMeleeArcVfx(
+              origin.clone().lerp(targetCenter, 0.55),
+              mahoragaAtk.isKick ? 3.2 : 3.8,
+              '#facc15'
+            );
+          } else {
+            this.spawnBeamTracer(origin, targetCenter, beamCol, 0.16, 0.05);
+          }
 
-          if (isShikigami && u.isAlliedToSummoner && bestTargetUnit.team === 'red') {
+          if (
+            isShikigami &&
+            (u.isAlliedToSummoner || u instanceof MahoragaShikigami) &&
+            (bestTargetUnit.team !== u.team || u instanceof MahoragaShikigami)
+          ) {
+            if (u instanceof MahoragaShikigami) {
+              u.notifyAttackLanded();
+            }
             this.damageUnit(
               bestTargetUnit,
               u.attackDamage,
               u instanceof MahoragaShikigami,
-              u.name,
-              targetCenter
+              attackSourceLabel,
+              targetCenter,
+              mahoragaAtk ? (mahoragaAtk.isKick ? 'SPARTAN KICK!' : 'SWORD OF EXTERMINATION!') : undefined
             );
             this.spawnCursedBurst(targetCenter, u.attackBurstVariant, 0.9, 18);
+            if (mahoragaAtk && bestTargetUnit.alive && bestTargetUnit.moveSpeed > 0) {
+              const pushDir = bestTargetUnit.group.position.clone().sub(u.group.position);
+              pushDir.y = 0;
+              if (pushDir.lengthSq() > 0.01) {
+                pushDir.normalize();
+                this.KnockbackUnitWithWallSlam(
+                  bestTargetUnit,
+                  pushDir,
+                  mahoragaAtk.knockback,
+                  mahoragaAtk.isKick ? 28 : 16
+                );
+              }
+            }
           } else {
             let dealt = u.attackDamage;
             if (bestTargetUnit instanceof ShikigamiEntity) {
@@ -6168,7 +6501,6 @@ export class FpsMobaEngine {
             scatterAngle: ang,
             createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
           });
-          rabbit.remainingLifetimeSec = 4.5;
           this.scene.add(rabbit.group);
           this.units.push(rabbit);
         }
@@ -6372,8 +6704,19 @@ export class FpsMobaEngine {
     }
     for (const other of this.units) {
       if (!other.alive || other === caster || other.isDestructable === false) continue;
+      if (!this.canUnitTakeDamageFrom(other, caster.id, caster.team)) continue;
       if (other.group.position.distanceTo(center) <= radius + other.radius) {
-        other.hp = Math.max(1, other.hp - playerDmg);
+        if (other.type === 'SHIKIGAMI' || other.type === 'CONSTRUCT') {
+          this.damageUnit(
+            other,
+            playerDmg,
+            false,
+            `${caster.name} (${abilityName})`,
+            other.group.position.clone().add(new THREE.Vector3(0, other.height * 0.5, 0))
+          );
+        } else {
+          other.hp = Math.max(1, other.hp - playerDmg);
+        }
       }
     }
   }
