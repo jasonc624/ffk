@@ -18,7 +18,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     maxHp: 450,
     maxMana: 100,
     ceRegenMultiplier: 0.85,
-    moveSpeed: 12.4,
+    moveSpeed: 9.3,
     weapon: {
       name: "Judge's Gavel (Giant Mallet)",
       fireMode: 'MELEE_CLEAVE',
@@ -102,7 +102,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     maxHp: 280,
     maxMana: 140,
     ceRegenMultiplier: 1.35,
-    moveSpeed: 13.6,
+    moveSpeed: 10.2,
     weapon: {
       name: 'Reversal Red [Hold / Click M1]',
       fireMode: 'BURST',
@@ -196,7 +196,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     maxHp: 270,
     maxMana: 130,
     ceRegenMultiplier: 1.25,
-    moveSpeed: 13.8,
+    moveSpeed: 10.35,
     weapon: {
       name: 'Ember Insects',
       fireMode: 'EMBER_INSECTS',
@@ -276,7 +276,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     maxHp: 290,
     maxMana: 135,
     ceRegenMultiplier: 1.25,
-    moveSpeed: 14.0,
+    moveSpeed: 10.5,
     weapon: {
       name: 'Cursed-Tool Broadsword',
       fireMode: 'MELEE_CLEAVE',
@@ -360,7 +360,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     maxHp: 320,
     maxMana: 120,
     ceRegenMultiplier: 1.1,
-    moveSpeed: 13.6,
+    moveSpeed: 10.2,
     weapon: {
       name: 'Bio-Plasmic Spore Cannon',
       fireMode: 'AUTO',
@@ -439,7 +439,7 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
     maxHp: 295,
     maxMana: 135,
     ceRegenMultiplier: 1.25,
-    moveSpeed: 14.2,
+    moveSpeed: 10.65,
     weapon: {
       name: 'Sky-Warping Palm Strikes',
       fireMode: 'MELEE_CLEAVE',

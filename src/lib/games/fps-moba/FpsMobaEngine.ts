@@ -25,6 +25,7 @@ import {
   createCursedExplosionParticles,
   createDrawnRealityWipe,
   createInfinityDistortionMaterial,
+  createNueLightningBolt,
   createRealityWarpBeamEffect,
   createShikigamiShadowCloud,
   createSkyVeilDistortionMaterial,
@@ -292,12 +293,14 @@ export class FpsMobaEngine {
   private isHoldingRabbitEscape = false;
   private rabbitHoldElapsedSec = 0;
   private rabbitHoldSpawnAccSec = 0;
+  private rabbitPileBasePos = new THREE.Vector3();
   private activeNueCarry: NueCarryShikigami | null = null;
   private npcMegumiShowcase: {
     mode: 'RABBIT_CLIMB' | 'NUE_CARRY' | 'SHADOW_STEP' | 'DOMAIN_MAHORAGA';
     timer: number;
     spawnAcc: number;
     dir: THREE.Vector3;
+    pileBase?: THREE.Vector3;
   } | null = null;
   private npcMegumiPuddleMesh: THREE.Mesh | null = null;
 
@@ -602,7 +605,7 @@ export class FpsMobaEngine {
       attackRange: 22,
       attackDamage: 18,
       attackCooldown: 0.9,
-      moveSpeed: 9.0,
+      moveSpeed: 6.75,
       goldValue: 300,
       xpValue: 160,
       isDestructable: true,
@@ -797,7 +800,7 @@ export class FpsMobaEngine {
           attackRange: 9,
           attackDamage: 10,
           attackCooldown: 1.2,
-          moveSpeed: 6.4,
+          moveSpeed: 4.8,
           goldValue: 45,
           xpValue: 35,
           isDestructable: true
@@ -1546,6 +1549,8 @@ export class FpsMobaEngine {
       spawnCursedBurst: (pos, variant, radius, count) =>
         this.spawnCursedBurst(pos, variant, radius, count),
       spawnShikigamiShadowCloud: (pos, radius) => this.spawnShikigamiShadowCloud(pos, radius),
+      spawnLightningBolt: (start, end) => this.spawnLightningBolt(start, end),
+      getFloorHeight: (x, z, currentY) => this.mapBuilder.getFloorHeight(x, z, currentY),
       spawnPopup: (label, color, y = 32, amount = 0, isCrit = false) => {
         this.damagePopups.push({
           id: this.popupCounter++,
@@ -1562,9 +1567,9 @@ export class FpsMobaEngine {
     };
   }
 
-  private spawnRabbitEscapeBatch(spawnCount: number) {
+  private spawnRabbitEscapeBatch(spawnCount: number, stacked = false): number {
     const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
-    const maxRabbits = inShadowGarden ? 28 : 18;
+    const maxRabbits = inShadowGarden ? 64 : 46;
 
     const existingRabbits = this.units.filter(
       (u): u is RabbitEscapeShikigami =>
@@ -1572,72 +1577,128 @@ export class FpsMobaEngine {
     );
     let excess = existingRabbits.length + spawnCount - maxRabbits;
     const shikiCtx = this.getShikigamiContext();
-    for (let i = 0; i < existingRabbits.length && excess > 0; i++) {
-      const old = existingRabbits[i];
+    // Prefer despawning oldest non-stacked field rabbits first so the active ground-up pile stays intact
+    const despawnOrder = [
+      ...existingRabbits.filter((r) => !r.stacked),
+      ...existingRabbits.filter((r) => r.stacked)
+    ];
+    for (let i = 0; i < despawnOrder.length && excess > 0; i++) {
+      const old = despawnOrder[i];
       old.onDespawn(shikiCtx);
       const idx = this.units.indexOf(old);
       if (idx !== -1) this.units.splice(idx, 1);
       excess--;
     }
 
+    const stackedCount = this.units.filter(
+      (u): u is RabbitEscapeShikigami =>
+        u.alive && u instanceof RabbitEscapeShikigami && u.summonerId === 'player' && u.stacked
+    ).length;
     const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    let pileTopY = this.rabbitPileBasePos.y;
 
     for (let i = 0; i < spawnCount; i++) {
-      const angle = (i / Math.max(1, spawnCount)) * Math.PI * 2 + Math.random() * 0.85;
-      const dist = 1.2 + Math.random() * 2.4;
-      const rawX = this.playerPos.x + Math.cos(angle) * dist + flatForward.x * 1.0;
-      const rawZ = this.playerPos.z + Math.sin(angle) * dist + flatForward.z * 1.0;
-      const resolved = this.mapBuilder.resolveHorizontalCollision(rawX, rawZ, 0.42, this.playerPos.y);
-      const spawnPos = new THREE.Vector3(
-        resolved.x,
-        this.mapBuilder.getFloorHeight(resolved.x, resolved.z, this.playerPos.y),
-        resolved.z
-      );
+      const stackIdx = stackedCount + i;
+      const angle = stackIdx * 2.39996 + Math.random() * 0.32;
+      if (stacked) {
+        // Pile up densely from the ground (baseY) upward in tapered rings of 4 rabbits per 0.44m layer
+        const rabbitsPerLayer = 4;
+        const layer = Math.floor(stackIdx / rabbitsPerLayer);
+        const slot = stackIdx % rabbitsPerLayer;
+        const baseTaper = Math.max(0.42, 1.08 - layer * 0.055);
+        const ringR = baseTaper * (0.48 + (slot / rabbitsPerLayer) * 0.65);
+        const offX = Math.cos(angle) * ringR;
+        const offZ = Math.sin(angle) * ringR;
+        const layerY = this.rabbitPileBasePos.y + layer * 0.44 + (slot % 2) * 0.08;
+        pileTopY = Math.max(pileTopY, layerY + 0.52);
 
-      const rabbit = new RabbitEscapeShikigami({
-        spawnPos,
-        team: 'blue',
-        summonerId: 'player',
-        hopPhase: Math.random() * Math.PI * 2,
-        scatterAngle: angle,
-        createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
-      });
-      this.scene.add(rabbit.group);
-      this.units.push(rabbit);
+        const rabbit = new RabbitEscapeShikigami({
+          spawnPos: new THREE.Vector3(
+            this.rabbitPileBasePos.x + offX,
+            layerY,
+            this.rabbitPileBasePos.z + offZ
+          ),
+          team: 'blue',
+          summonerId: 'player',
+          hopPhase: Math.random() * Math.PI * 2,
+          scatterAngle: angle,
+          stacked: true,
+          createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+        });
+        this.scene.add(rabbit.group);
+        this.units.push(rabbit);
+      } else {
+        const dist = 1.2 + Math.random() * 2.4;
+        const rawX = this.playerPos.x + Math.cos(angle) * dist + flatForward.x * 1.0;
+        const rawZ = this.playerPos.z + Math.sin(angle) * dist + flatForward.z * 1.0;
+        const resolved = this.mapBuilder.resolveHorizontalCollision(rawX, rawZ, 0.42, this.playerPos.y);
+        const spawnPos = new THREE.Vector3(
+          resolved.x,
+          this.mapBuilder.getFloorHeight(resolved.x, resolved.z, this.playerPos.y),
+          resolved.z
+        );
+
+        const rabbit = new RabbitEscapeShikigami({
+          spawnPos,
+          team: 'blue',
+          summonerId: 'player',
+          hopPhase: Math.random() * Math.PI * 2,
+          scatterAngle: angle,
+          createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+        });
+        this.scene.add(rabbit.group);
+        this.units.push(rabbit);
+      }
     }
+    return pileTopY;
+  }
+
+  private releaseStackedRabbits(summonerId: string) {
+    const stackedRabbits = this.units.filter(
+      (u): u is RabbitEscapeShikigami =>
+        u.alive && u instanceof RabbitEscapeShikigami && u.summonerId === summonerId && u.stacked
+    );
+    if (stackedRabbits.length === 0) return;
+    stackedRabbits.forEach((rabbit, idx) => {
+      const burstAngle = (idx / stackedRabbits.length) * Math.PI * 2 + Math.random() * 0.45;
+      rabbit.releaseFromStack(burstAngle);
+    });
+    const center = stackedRabbits[0].group.position.clone();
+    this.spawnImpactRing(center, '#e2e8f0', 4.6);
   }
 
   private beginHoldingRabbitEscape() {
     if (this.isHoldingRabbitEscape) return;
+    // Rabbit Escape can only pile up from the ground and launch Megumi upwards if he is on the ground!
+    if (!this.grounded) return;
     const sec = this.hero.secondaryFire;
     if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
     this.exitShadowStep();
 
-    // Base activation cost; holding M2 continues draining Cursed Energy and spawning more rabbits while climbing higher
+    // Base activation cost; holding M2 piles rabbits up from the ground beneath Megumi until released
     this.consumeCursedEnergy(sec.manaCost ?? 12);
     this.viewModel.triggerCastGesture();
 
     this.isHoldingRabbitEscape = true;
     this.rabbitHoldElapsedSec = 0;
     this.rabbitHoldSpawnAccSec = 0;
+    const floorY = this.mapBuilder.getFloorHeight(this.playerPos.x, this.playerPos.z, this.playerPos.y);
+    this.rabbitPileBasePos.set(this.playerPos.x, floorY, this.playerPos.z);
 
     const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
-    const initialCount = inShadowGarden ? 6 : 4;
-    this.spawnRabbitEscapeBatch(initialCount);
+    const initialCount = inShadowGarden ? 10 : 8;
+    const pileTopY = this.spawnRabbitEscapeBatch(initialCount, true);
 
-    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
     this.shield = Math.min(200, this.shield + 15);
-    // Initial lift; holding M2 continues propelling Megumi higher!
-    this.playerVel.y = 14.5;
-    this.playerVel.x += flatForward.x * 3.5;
-    this.playerVel.z += flatForward.z * 3.5;
+    this.playerPos.y = Math.max(this.playerPos.y, pileTopY);
+    this.playerVel.y = 5.5;
     this.grounded = false;
     this.rabbitLaunchBoostTimer = 0.65;
     this.nueCarryAvailable = true;
     this.nueCarryDelaySec = 0.22;
 
-    this.spawnImpactRing(this.playerPos.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 4.6);
-    this.spawnCursedBurst(this.playerPos.clone().add(new THREE.Vector3(0, 0.7, 0)), 'SHADOW', 2.2, 45);
+    this.spawnImpactRing(this.rabbitPileBasePos.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 4.6);
+    this.spawnCursedBurst(this.rabbitPileBasePos.clone().add(new THREE.Vector3(0, 0.6, 0)), 'SHADOW', 2.2, 45);
   }
 
   private finishHoldingRabbitEscape() {
@@ -1645,6 +1706,13 @@ export class FpsMobaEngine {
     this.isHoldingRabbitEscape = false;
     this.rabbitHoldElapsedSec = 0;
     this.rabbitHoldSpawnAccSec = 0;
+    // Spring off the top of the rabbit pile & release all stacked rabbits to attack nearby enemies!
+    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    this.playerVel.y = Math.max(this.playerVel.y, 11.5);
+    this.playerVel.x += flatForward.x * 4.0;
+    this.playerVel.z += flatForward.z * 4.0;
+    this.rabbitLaunchBoostTimer = 0.65;
+    this.releaseStackedRabbits('player');
     const sec = this.hero.secondaryFire;
     const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
     this.secondaryCooldownMs = inShadowGarden ? 2500 : (sec.cooldownMs ?? 6500);
@@ -4184,6 +4252,19 @@ export class FpsMobaEngine {
     });
   }
 
+  private spawnLightningBolt(start: THREE.Vector3, end: THREE.Vector3) {
+    const bolt = createNueLightningBolt(start, end);
+    this.scene.add(bolt.group);
+    this.vfxList.push({
+      mesh: bolt.group,
+      age: 0,
+      maxAge: 0.24,
+      onUpdate: (dt, progress) => {
+        bolt.update(dt, progress);
+      }
+    });
+  }
+
   private spawnImpactRing(pos: THREE.Vector3, colorHex: string, maxRadius: number) {
     const geo = new THREE.RingGeometry(0.18, 0.38, 28);
     const mat = new THREE.MeshBasicMaterial({
@@ -4968,25 +5049,28 @@ export class FpsMobaEngine {
         const drainPerSec = this.hero.secondaryFire.manaDrainPerSec ?? 22;
         this.consumeCursedEnergy(drainPerSec * dt);
 
-        // Propel Megumi steadily higher the longer M2 is held!
-        const climbProgress = Math.min(1, this.rabbitHoldElapsedSec / maxHoldSec);
-        const targetClimbVelY = THREE.MathUtils.lerp(15.5, 22.5, climbProgress);
-        this.playerVel.y = Math.max(this.playerVel.y, targetClimbVelY);
+        // Keep Megumi riding directly atop the rabbit pile as it builds up from the ground
+        this.playerPos.x = THREE.MathUtils.lerp(this.playerPos.x, this.rabbitPileBasePos.x, Math.min(1, dt * 8));
+        this.playerPos.z = THREE.MathUtils.lerp(this.playerPos.z, this.rabbitPileBasePos.z, Math.min(1, dt * 8));
+        this.playerVel.x *= 0.6;
+        this.playerVel.z *= 0.6;
+        this.playerVel.y = 5.2;
         this.grounded = false;
         this.rabbitLaunchBoostTimer = 0.55;
         this.nueCarryAvailable = true;
 
-        // Spawn additional waves of persistent 20-HP rabbits every 0.14s while M2 is held
-        const spawnInterval = 0.14;
+        // Pile additional dense waves of persistent 20-HP rabbits every 0.095s while M2 is held
+        const spawnInterval = 0.095;
         if (this.rabbitHoldSpawnAccSec >= spawnInterval) {
           this.rabbitHoldSpawnAccSec -= spawnInterval;
           const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
-          this.spawnRabbitEscapeBatch(inShadowGarden ? 3 : 2);
+          const pileTopY = this.spawnRabbitEscapeBatch(inShadowGarden ? 5 : 4, true);
+          this.playerPos.y = Math.max(this.playerPos.y, pileTopY);
           this.spawnCursedBurst(
-            this.playerPos.clone().add(new THREE.Vector3(0, 0.3, 0)),
+            new THREE.Vector3(this.rabbitPileBasePos.x, pileTopY, this.rabbitPileBasePos.z),
             'SHADOW',
-            1.4,
-            18
+            1.35,
+            16
           );
         }
 
@@ -5360,7 +5444,12 @@ export class FpsMobaEngine {
           this.units.splice(i, 1);
           continue;
         }
-        if (u instanceof ToadShikigami || u instanceof NueShikigami || u instanceof NueCarryShikigami) {
+        if (
+          u instanceof ToadShikigami ||
+          u instanceof NueShikigami ||
+          u instanceof NueCarryShikigami ||
+          (u instanceof RabbitEscapeShikigami && u.stacked)
+        ) {
           continue;
         }
       }
@@ -5467,7 +5556,7 @@ export class FpsMobaEngine {
               u.roamTarget = this.pickRandomRoamTarget(u.radius);
             } else {
               const domainSlow = this.getDomainSlowMultiplier(u);
-              const activeSpeed = (phase === 'walk' ? 4.2 : u.moveSpeed) * domainSlow;
+              const activeSpeed = (phase === 'walk' ? 3.15 : u.moveSpeed) * domainSlow;
               const step = Math.min(dist, activeSpeed * dt);
               const nx = (dx / dist) * step;
               const nz = (dz / dist) * step;
@@ -5795,6 +5884,7 @@ export class FpsMobaEngine {
 
   private resetNpcMegumiShowcase(u: MobaUnit) {
     this.npcMegumiShowcase = null;
+    this.releaseStackedRabbits(u.id);
     if (this.npcMegumiPuddleMesh) {
       this.npcMegumiPuddleMesh.visible = false;
     }
@@ -5811,40 +5901,88 @@ export class FpsMobaEngine {
     this.endNpcDomain(u.id);
   }
 
-  private spawnNpcMegumiRabbitBatch(u: MobaUnit, spawnCount: number) {
-    const maxNpcRabbits = 12;
+  private spawnNpcMegumiRabbitBatch(
+    u: MobaUnit,
+    spawnCount: number,
+    stacked = true,
+    pileBase?: THREE.Vector3
+  ): number {
+    const maxNpcRabbits = 44;
     const existingRabbits = this.units.filter(
       (r): r is RabbitEscapeShikigami =>
         r.alive && r instanceof RabbitEscapeShikigami && r.summonerId === u.id
     );
     let excess = existingRabbits.length + spawnCount - maxNpcRabbits;
     const shikiCtx = this.getShikigamiContext();
-    for (let i = 0; i < existingRabbits.length && excess > 0; i++) {
-      const old = existingRabbits[i];
+    const despawnOrder = [
+      ...existingRabbits.filter((r) => !r.stacked),
+      ...existingRabbits.filter((r) => r.stacked)
+    ];
+    for (let i = 0; i < despawnOrder.length && excess > 0; i++) {
+      const old = despawnOrder[i];
       old.onDespawn(shikiCtx);
       const idx = this.units.indexOf(old);
       if (idx !== -1) this.units.splice(idx, 1);
       excess--;
     }
 
+    const stackedCount = this.units.filter(
+      (r): r is RabbitEscapeShikigami =>
+        r.alive && r instanceof RabbitEscapeShikigami && r.summonerId === u.id && r.stacked
+    ).length;
+    const base =
+      pileBase ??
+      new THREE.Vector3(
+        u.group.position.x,
+        this.mapBuilder.getFloorHeight(u.group.position.x, u.group.position.z, u.group.position.y),
+        u.group.position.z
+      );
+    let pileTopY = base.y;
+
     for (let i = 0; i < spawnCount; i++) {
-      const angle = (i / Math.max(1, spawnCount)) * Math.PI * 2 + Math.random() * 0.9;
-      const dist = 1.0 + Math.random() * 1.9;
-      const rx = u.group.position.x + Math.cos(angle) * dist;
-      const rz = u.group.position.z + Math.sin(angle) * dist;
-      const res = this.mapBuilder.resolveHorizontalCollision(rx, rz, 0.42, 0);
-      const groundY = this.mapBuilder.getFloorHeight(res.x, res.z, 0);
-      const rabbit = new RabbitEscapeShikigami({
-        spawnPos: new THREE.Vector3(res.x, groundY, res.z),
-        team: u.team,
-        summonerId: u.id,
-        hopPhase: Math.random() * Math.PI * 2,
-        scatterAngle: angle,
-        createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
-      });
-      this.scene.add(rabbit.group);
-      this.units.push(rabbit);
+      const stackIdx = stackedCount + i;
+      const angle = stackIdx * 2.39996 + Math.random() * 0.32;
+      if (stacked) {
+        const rabbitsPerLayer = 4;
+        const layer = Math.floor(stackIdx / rabbitsPerLayer);
+        const slot = stackIdx % rabbitsPerLayer;
+        const baseTaper = Math.max(0.42, 1.08 - layer * 0.055);
+        const ringR = baseTaper * (0.48 + (slot / rabbitsPerLayer) * 0.65);
+        const offX = Math.cos(angle) * ringR;
+        const offZ = Math.sin(angle) * ringR;
+        const layerY = base.y + layer * 0.44 + (slot % 2) * 0.08;
+        pileTopY = Math.max(pileTopY, layerY + 0.52);
+
+        const rabbit = new RabbitEscapeShikigami({
+          spawnPos: new THREE.Vector3(base.x + offX, layerY, base.z + offZ),
+          team: u.team,
+          summonerId: u.id,
+          hopPhase: Math.random() * Math.PI * 2,
+          scatterAngle: angle,
+          stacked: true,
+          createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+        });
+        this.scene.add(rabbit.group);
+        this.units.push(rabbit);
+      } else {
+        const dist = 1.0 + Math.random() * 1.9;
+        const rx = u.group.position.x + Math.cos(angle) * dist;
+        const rz = u.group.position.z + Math.sin(angle) * dist;
+        const res = this.mapBuilder.resolveHorizontalCollision(rx, rz, 0.42, 0);
+        const groundY = this.mapBuilder.getFloorHeight(res.x, res.z, 0);
+        const rabbit = new RabbitEscapeShikigami({
+          spawnPos: new THREE.Vector3(res.x, groundY, res.z),
+          team: u.team,
+          summonerId: u.id,
+          hopPhase: Math.random() * Math.PI * 2,
+          scatterAngle: angle,
+          createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+        });
+        this.scene.add(rabbit.group);
+        this.units.push(rabbit);
+      }
     }
+    return pileTopY;
   }
 
   private updateNpcMegumiShowcase(u: MobaUnit, dt: number, elapsed: number): boolean {
@@ -5853,42 +5991,37 @@ export class FpsMobaEngine {
 
     st.timer -= dt;
 
-    // 1. [Hold M2] Rabbit Escape: same climb & 0.14s wave spawn logic as the playable Megumi character
+    // 1. [Hold M2] Rabbit Escape: piles up densely from the ground beneath Megumi until released
     if (st.mode === 'RABBIT_CLIMB') {
-      const maxHoldSec = 1.45;
-      const holdElapsed = Math.max(0, maxHoldSec - st.timer);
-      const climbProgress = Math.min(1, holdElapsed / maxHoldSec);
-      const climbVelY = THREE.MathUtils.lerp(15.5, 22.5, climbProgress);
-
       u.pullActiveTimer = 0.15;
-      u.group.position.y = Math.min(14.5, u.group.position.y + climbVelY * 0.45 * dt);
-      const res = this.mapBuilder.resolveHorizontalCollision(
-        u.group.position.x + st.dir.x * 3.5 * dt,
-        u.group.position.z + st.dir.z * 3.5 * dt,
-        u.radius,
-        u.group.position.y
-      );
-      u.group.position.x = res.x;
-      u.group.position.z = res.z;
+      const pileBase = st.pileBase ?? u.group.position.clone();
+      u.group.position.x = pileBase.x;
+      u.group.position.z = pileBase.z;
       this.clampUnitToDomainBarrier(u);
       this.rotateUnitToward(u, st.dir.x, st.dir.z, dt);
       u.animateRig?.(elapsed, true, false, 'megumi_upward_slash');
 
       st.spawnAcc += dt;
-      const spawnInterval = 0.14;
+      const spawnInterval = 0.095;
       if (st.spawnAcc >= spawnInterval) {
         st.spawnAcc -= spawnInterval;
         const inShadowGarden = this.activeDomains.some((d) => d.casterId === u.id && d.isMegumiDomain);
-        this.spawnNpcMegumiRabbitBatch(u, inShadowGarden ? 3 : 2);
+        const pileTopY = this.spawnNpcMegumiRabbitBatch(u, inShadowGarden ? 5 : 4, true, pileBase);
+        u.group.position.y = Math.max(u.group.position.y, pileTopY);
         this.spawnCursedBurst(
-          u.group.position.clone().add(new THREE.Vector3(0, 0.3, 0)),
+          new THREE.Vector3(pileBase.x, pileTopY, pileBase.z),
           'SHADOW',
-          1.4,
-          18
+          1.35,
+          16
         );
+      } else {
+        u.group.position.y = Math.min(12.0, u.group.position.y + 4.2 * dt);
       }
 
       if (st.timer <= 0) {
+        // Release the stacked rabbit pile so all rabbits burst apart and swarm nearby enemies!
+        this.releaseStackedRabbits(u.id);
+        u.group.position.y += 1.2;
         // Transition midair into [Hold SPACE] Nue Carry Flight (2.0s duration, exact same as player startNueCarry)
         st.mode = 'NUE_CARRY';
         st.timer = 2.0;
@@ -6083,7 +6216,7 @@ export class FpsMobaEngine {
           }
           mx = -dir.z * ai.strafeDir;
           mz = dir.x * ai.strafeDir;
-          spd = 4.2;
+          spd = 3.15;
           phase = 'walk';
         }
       } else {
@@ -6101,7 +6234,7 @@ export class FpsMobaEngine {
         } else {
           mx = wx / wd;
           mz = wz / wd;
-          spd = 4.2;
+          spd = 3.15;
           phase = 'walk';
           this.rotateUnitToward(u, wx, wz, dt);
         }
@@ -6655,19 +6788,28 @@ export class FpsMobaEngine {
           this.damageTargetsAroundNpc(u, slashPos, wep.range * 0.6, wep.damage, wep.name);
         }
       } else if (megumiStep === 1) {
-        // [Hold M2] Rabbit Escape [Hold Right Click] (hero.secondaryFire) -> [Hold SPACE] Nue Carry (2.0s)
+        // [Hold M2] Rabbit Escape [Hold Right Click] (only launches if on the ground!) -> [Hold SPACE] Nue Carry (2.0s)
+        const npcFloorY = this.mapBuilder.getFloorHeight(u.group.position.x, u.group.position.z, u.group.position.y);
+        if (u.group.position.y > npcFloorY + 0.25) {
+          u.npcAbilityTimer = 0.5;
+          u.npcAbilityIndex = 1; // Retry once Megumi NPC has landed
+          return;
+        }
         u.npcAbilityTimer = 4.6;
         u.pullActiveTimer = 0.2;
         const inShadowGarden = this.activeDomains.some((d) => d.casterId === u.id && d.isMegumiDomain);
+        const pileBase = new THREE.Vector3(u.group.position.x, npcFloorY, u.group.position.z);
         this.npcMegumiShowcase = {
           mode: 'RABBIT_CLIMB',
           timer: 1.45,
           spawnAcc: 0,
-          dir: flatDir.clone()
+          dir: flatDir.clone(),
+          pileBase
         };
-        this.spawnNpcMegumiRabbitBatch(u, inShadowGarden ? 6 : 4);
-        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 4.6);
-        this.spawnCursedBurst(u.group.position.clone().add(new THREE.Vector3(0, 0.7, 0)), 'SHADOW', 2.2, 45);
+        const pileTopY = this.spawnNpcMegumiRabbitBatch(u, inShadowGarden ? 10 : 8, true, pileBase);
+        u.group.position.y = Math.max(u.group.position.y, pileTopY);
+        this.spawnImpactRing(pileBase.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 4.6);
+        this.spawnCursedBurst(pileBase.clone().add(new THREE.Vector3(0, 0.6, 0)), 'SHADOW', 2.2, 45);
       } else if (megumiStep === 2) {
         // [SHIFT] Shadow Step (hero.abilities.SHIFT: 2.4s floor shadow submersion at +45% speed)
         const shiftAb = hero.abilities.SHIFT;

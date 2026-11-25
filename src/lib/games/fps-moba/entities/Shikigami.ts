@@ -54,6 +54,8 @@ export interface ShikigamiContext {
     count?: number
   ) => void;
   spawnShikigamiShadowCloud: (pos: THREE.Vector3, radius?: number) => void;
+  spawnLightningBolt: (start: THREE.Vector3, end: THREE.Vector3) => void;
+  getFloorHeight: (x: number, z: number, currentY: number) => number;
   spawnPopup: (label: string, color: string, y?: number, amount?: number, isCrit?: boolean) => void;
 }
 
@@ -288,7 +290,7 @@ export class DivineDogShikigami extends ShikigamiEntity {
       attackRange: 3.1,
       attackDamage: 34,
       attackCooldown: 0.72,
-      moveSpeed: 16.0,
+      moveSpeed: 12.0,
       goldValue: 0,
       xpValue: 0,
       lifetimeSec: 18.0,
@@ -341,6 +343,8 @@ export class DivineDogShikigami extends ShikigamiEntity {
 export class RabbitEscapeShikigami extends ShikigamiEntity {
   private readonly hopPhase: number;
   private readonly scatterAngle: number;
+  public stacked: boolean;
+  private readonly pileBasePos: THREE.Vector3;
 
   constructor(opts: {
     spawnPos: THREE.Vector3;
@@ -348,6 +352,7 @@ export class RabbitEscapeShikigami extends ShikigamiEntity {
     summonerId: string;
     hopPhase: number;
     scatterAngle: number;
+    stacked?: boolean;
     createHpBar: FloatingHpBarFactory;
   }) {
     const rabbitGroup = new THREE.Group();
@@ -414,7 +419,7 @@ export class RabbitEscapeShikigami extends ShikigamiEntity {
       attackRange: 2.1,
       attackDamage: 8,
       attackCooldown: 0.95,
-      moveSpeed: 15.2,
+      moveSpeed: 11.4,
       goldValue: 0,
       xpValue: 0,
       lifetimeSec: null,
@@ -437,11 +442,45 @@ export class RabbitEscapeShikigami extends ShikigamiEntity {
 
     this.hopPhase = hopPhase;
     this.scatterAngle = opts.scatterAngle;
+    this.stacked = opts.stacked ?? false;
+    this.pileBasePos = opts.spawnPos.clone();
+    if (this.stacked) {
+      this.pullActiveTimer = 0.2;
+    }
     this.attackTimer = 0.2 + (hopPhase % 0.4);
   }
 
+  /** Releases this rabbit from Megumi's Rabbit Escape pile so it bursts outward and attacks nearby enemies. */
+  public releaseFromStack(burstAngle: number): void {
+    if (!this.stacked) return;
+    this.stacked = false;
+    this.pullActiveTimer = 0;
+    this.group.position.x += Math.cos(burstAngle) * (0.55 + Math.random() * 0.75);
+    this.group.position.z += Math.sin(burstAngle) * (0.55 + Math.random() * 0.75);
+    this.verticalVel = 3.5 + Math.random() * 4.5;
+    this.group.rotation.y = burstAngle;
+  }
+
+  public override tickShikigami(dt: number, elapsed: number, ctx: ShikigamiContext): boolean {
+    if (this.stacked) {
+      this.pullActiveTimer = 0.2;
+      const wobbleX = Math.sin(elapsed * 15 + this.hopPhase) * 0.045;
+      const wobbleZ = Math.cos(elapsed * 15 + this.hopPhase) * 0.045;
+      this.group.position.set(
+        this.pileBasePos.x + wobbleX,
+        this.pileBasePos.y,
+        this.pileBasePos.z + wobbleZ
+      );
+      this.group.rotation.y = this.scatterAngle + Math.sin(elapsed * 6 + this.hopPhase) * 0.35;
+      this.animateRig?.(elapsed, false, false);
+    }
+    return super.tickShikigami(dt, elapsed, ctx);
+  }
+
   public override selectTarget(ctx: ShikigamiContext): ShikigamiTarget | null {
-    // Remain on the field and swarm nearby enemies (within 50m)
+    // Stay stacked under Megumi until he releases Rabbit Escape
+    if (this.stacked) return null;
+    // Once released, remain on the field and swarm all nearby enemies (within 50m)
     let bestUnit: ShikigamiTargetableUnit | null = null;
     let bestDist = 50;
     for (const other of ctx.units) {
@@ -583,6 +622,7 @@ export class NueShikigami extends ShikigamiEntity {
   private readonly wingRight: THREE.Mesh;
   private readonly diveDuration = 0.52;
   private mixer: THREE.AnimationMixer | null = null;
+  private boltTimer = 0.05;
   private t = 0;
   private detonated = false;
 
@@ -770,6 +810,21 @@ export class NueShikigami extends ShikigamiEntity {
         this.group.lookAt(this.group.position.clone().add(delta));
       }
 
+      // Rain lightning bolts down underneath Nue as it swoops across the sky
+      this.boltTimer -= dt;
+      if (this.boltTimer <= 0) {
+        this.boltTimer = 0.08 + Math.random() * 0.05;
+        const ox = this.group.position.x + (Math.random() - 0.5) * 2.6;
+        const oz = this.group.position.z + (Math.random() - 0.5) * 2.0;
+        const gx = ox + (Math.random() - 0.5) * 1.2;
+        const gz = oz + (Math.random() - 0.5) * 1.2;
+        const floorY = ctx.getFloorHeight(gx, gz, this.group.position.y);
+        const start = new THREE.Vector3(ox, Math.max(floorY + 1.2, this.group.position.y - 0.6), oz);
+        const end = new THREE.Vector3(gx, floorY + 0.06, gz);
+        ctx.spawnLightningBolt(start, end);
+        ctx.spawnImpactRing(end, '#38bdf8', 1.45);
+      }
+
       if (p >= 1) {
         this.detonate(ctx);
       }
@@ -798,6 +853,7 @@ export class NueCarryShikigami extends ShikigamiEntity {
   private readonly wingLeft: THREE.Mesh;
   private readonly wingRight: THREE.Mesh;
   private mixer: THREE.AnimationMixer | null = null;
+  private boltTimer = 0.08;
   private posRef?: () => THREE.Vector3;
   private yawRef: () => number;
 
@@ -940,6 +996,40 @@ export class NueCarryShikigami extends ShikigamiEntity {
     const carrierPos = this.posRef ? this.posRef() : ctx.playerPos;
     this.group.position.set(carrierPos.x, carrierPos.y + 2.75, carrierPos.z);
     this.group.rotation.y = this.yawRef();
+
+    // Rain electric lightning bolts down underneath Nue as he flies by!
+    this.boltTimer -= dt;
+    if (this.boltTimer <= 0) {
+      this.boltTimer = 0.1 + Math.random() * 0.07;
+      const spreadX = (Math.random() - 0.5) * 3.4;
+      const spreadZ = (Math.random() - 0.5) * 2.6;
+      const ox = this.group.position.x + spreadX;
+      const oz = this.group.position.z + spreadZ;
+      const gx = ox + (Math.random() - 0.5) * 1.4;
+      const gz = oz + (Math.random() - 0.5) * 1.4;
+      const floorY = ctx.getFloorHeight(gx, gz, this.group.position.y);
+      const start = new THREE.Vector3(ox, Math.max(floorY + 1.5, this.group.position.y - 0.65), oz);
+      const end = new THREE.Vector3(gx, floorY + 0.06, gz);
+      ctx.spawnLightningBolt(start, end);
+      ctx.spawnImpactRing(end, Math.random() < 0.35 ? '#facc15' : '#38bdf8', 1.65);
+
+      // Zap any enemy unit caught directly underneath the lightning strike
+      for (const u of ctx.units) {
+        if (!u.alive || u === this || u.team === this.team || u.id === this.summonerId) continue;
+        const d = Math.hypot(u.group.position.x - gx, u.group.position.z - gz);
+        if (d <= 2.3 + u.radius) {
+          u.stunTimer = Math.max(u.stunTimer ?? 0, 0.25);
+          ctx.damageUnit(
+            u,
+            14,
+            false,
+            'Nue Flight Lightning',
+            u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.6, 0)),
+            'ZAP!'
+          );
+        }
+      }
+    }
 
     return super.tickShikigami(dt, elapsed, ctx);
   }
@@ -1135,7 +1225,7 @@ export class MahoragaShikigami extends ShikigamiEntity {
       attackRange: 4.4,
       attackDamage: 62,
       attackCooldown: 1.05,
-      moveSpeed: 13.6,
+      moveSpeed: 10.2,
       goldValue: 180,
       xpValue: 140,
       lifetimeSec: null,

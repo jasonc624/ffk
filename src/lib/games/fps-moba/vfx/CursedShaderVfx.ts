@@ -2396,4 +2396,95 @@ export function createShikigamiShadowCloud(radius = 1.6): {
   return { group, update };
 }
 
+/**
+ * Jagged electric cyan/gold lightning bolt striking downward from Nue's wings to the ground below.
+ */
+export function createNueLightningBolt(
+  startPos: THREE.Vector3,
+  endPos: THREE.Vector3
+): {
+  group: THREE.Group;
+  update: (dt: number, progress: number) => void;
+} {
+  const group = new THREE.Group();
+  const mats: THREE.MeshBasicMaterial[] = [];
+
+  const buildJaggedBranch = (
+    p0: THREE.Vector3,
+    p1: THREE.Vector3,
+    segments: number,
+    jitter: number,
+    thickness: number,
+    colorHex: number,
+    baseOpacity: number
+  ): THREE.Vector3[] => {
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const p = new THREE.Vector3().lerpVectors(p0, p1, t);
+      if (i > 0 && i < segments) {
+        const env = Math.sin(t * Math.PI);
+        p.x += (Math.random() - 0.5) * 2 * jitter * env;
+        p.z += (Math.random() - 0.5) * 2 * jitter * env;
+      }
+      pts.push(p);
+    }
+
+    const mat = new THREE.MeshBasicMaterial({
+      color: colorHex,
+      transparent: true,
+      opacity: baseOpacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    mats.push(mat);
+
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      const dist = a.distanceTo(b);
+      if (dist < 0.02) continue;
+      const segGeo = new THREE.CylinderGeometry(thickness * 0.72, thickness, dist, 5, 1, true);
+      segGeo.rotateX(Math.PI / 2);
+      const segMesh = new THREE.Mesh(segGeo, mat);
+      segMesh.position.lerpVectors(a, b, 0.5);
+      segMesh.lookAt(b);
+      group.add(segMesh);
+    }
+    return pts;
+  };
+
+  // Main electric core + glowing cyan outer sheath
+  const mainPts = buildJaggedBranch(startPos, endPos, 8, 0.55, 0.055, 0xe0f2fe, 0.98);
+  buildJaggedBranch(startPos, endPos, 7, 0.62, 0.13, 0x38bdf8, 0.55);
+
+  // 2 forked side arcs branching off mid-bolt
+  for (let f = 0; f < 2; f++) {
+    const idx = 2 + Math.floor(Math.random() * Math.max(1, mainPts.length - 4));
+    const origin = mainPts[idx];
+    if (!origin) continue;
+    const forkEnd = origin
+      .clone()
+      .add(
+        new THREE.Vector3(
+          (Math.random() - 0.5) * 2.4,
+          -(1.0 + Math.random() * 1.8),
+          (Math.random() - 0.5) * 2.4
+        )
+      );
+    if (forkEnd.y < endPos.y) forkEnd.y = endPos.y;
+    buildJaggedBranch(origin, forkEnd, 4, 0.3, 0.032, f === 0 ? 0xfacc15 : 0x7dd3fc, 0.85);
+  }
+
+  const update = (_dt: number, progress: number) => {
+    const flicker = 0.72 + Math.sin(progress * 55.0) * 0.28;
+    const fade = Math.pow(Math.max(0, 1 - progress), 1.35) * flicker;
+    for (let i = 0; i < mats.length; i++) {
+      mats[i].opacity = (i === 1 ? 0.55 : 0.95) * fade;
+    }
+  };
+
+  return { group, update };
+}
+
 
