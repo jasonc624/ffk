@@ -134,6 +134,9 @@ export class MobaUnitEntity extends MobaEntity<MobaUnitType> {
   roamPhase?: HeroAnimHint;
   roamTimer?: number;
   roamTarget?: THREE.Vector3;
+  animOverrideHint?: HeroAnimHint;
+  animOverrideTimer?: number;
+  npcDelayedBeam?: { timer: number; dir: THREE.Vector3 };
   respawnTimer?: number;
   spawnPos?: THREE.Vector3;
   stunTimer?: number;

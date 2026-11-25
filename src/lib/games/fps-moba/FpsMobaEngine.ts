@@ -23,10 +23,13 @@ import { buildProceduralHeroModel, type HeroAnimHint } from './entities/Procedur
 import {
   createCursedEnergyOrb,
   createCursedExplosionParticles,
+  createDrawnRealityWipe,
   createInfinityDistortionMaterial,
+  createRealityWarpBeamEffect,
   createSkyVeilDistortionMaterial,
   createThinIceShatterEffect,
   createUnlimitedVoidDomainVfx,
+  type DrawnRealityWipeController,
   type UnlimitedVoidDomainController
 } from './vfx/CursedShaderVfx';
 import { getAiAttackingEnabled, getHandDistanceOffset, getMouseSensitivity } from './storage';
@@ -116,6 +119,9 @@ export interface MobaUnit {
   roamPhase?: HeroAnimHint;
   roamTimer?: number;
   roamTarget?: THREE.Vector3;
+  animOverrideHint?: HeroAnimHint;
+  animOverrideTimer?: number;
+  npcDelayedBeam?: { timer: number; dir: THREE.Vector3 };
   outOfCombatTimer?: number;
   respawnTimer?: number;
   spawnPos?: THREE.Vector3;
@@ -234,10 +240,30 @@ export class FpsMobaEngine {
   // Jogo abilities: Flame Dash, wall-sticking Mini Volcanoes, and Hold-Q Maximum: Meteor targeting
   private flameDashTimer = 0;
   private flameDashDir = new THREE.Vector3();
-  // Uro Takako abilities: Sky Pull 3D dash, buoyant hang-time, and airborne Sky Hover
+  // Uro Takako abilities: Sky Flight, up to 3 persistent 5s Drawn Reality Wipes, dual-mode Thin Ice Breaker, & 3rd-person anims
   private skyPullTimer = 0;
   private skyPullBoostTimer = 0;
   private skyPullDir = new THREE.Vector3();
+  private uroFlightTimer = 0;
+  private uroAerialSlamActive = false;
+  private activeRealityWipes: Array<{
+    id: number;
+    casterId: string;
+    team: MobaTeam;
+    controller: DrawnRealityWipeController;
+    points: THREE.Vector3[];
+    viewForward: THREE.Vector3;
+    isDrawing: boolean;
+    drawElapsed: number;
+    strokeLength: number;
+    age: number;
+    maxAge: number;
+  }> = [];
+  private realityWipeIdCounter = 1;
+  private thinIceWindupTimer = 0;
+  private thinIcePendingAb: FpsAbilityDef | null = null;
+  private uroActionCamTimer = 0;
+  private uroActionAnimHint: HeroAnimHint = 'idle';
   private isSkyHovering = false;
   private skyDeflectCounterCooldown = 0;
   private activeVolcanoes: Array<{
@@ -864,7 +890,9 @@ export class FpsMobaEngine {
   private ensurePlayerAvatar() {
     if (
       this.playerAvatar ||
-      (this.hero.abilities.SHIFT.kind !== 'LIMITLESS_TELEPORT' && this.hero.id !== 'jogo')
+      (this.hero.abilities.SHIFT.kind !== 'LIMITLESS_TELEPORT' &&
+        this.hero.id !== 'jogo' &&
+        this.hero.id !== 'uro')
     ) {
       return;
     }
@@ -992,7 +1020,16 @@ export class FpsMobaEngine {
       this.cancelMeteorAim();
     }
 
-    const target = this.teleportPhase !== 'NONE' || this.meteorAiming ? 1 : 0;
+    if (this.uroActionCamTimer > 0) {
+      this.uroActionCamTimer = Math.max(0, this.uroActionCamTimer - dt);
+    }
+
+    const target =
+      this.teleportPhase !== 'NONE' || this.meteorAiming
+        ? 1
+        : this.uroActionCamTimer > 0
+          ? 0.82
+          : 0;
     this.teleportCamBlend += (target - this.teleportCamBlend) * Math.min(1, dt * 9);
     if (Math.abs(this.teleportCamBlend - target) < 0.002) this.teleportCamBlend = target;
 
@@ -1014,7 +1051,9 @@ export class FpsMobaEngine {
           1 + this.teleportMorph * 2.2,
           1 - this.teleportMorph * 0.75
         );
-        avatar.animate(elapsed, false, false, 'idle');
+        const avatarHint: HeroAnimHint =
+          this.hero.id === 'uro' && this.uroActionCamTimer > 0 ? this.uroActionAnimHint : 'idle';
+        avatar.animate(elapsed, false, false, avatarHint);
       }
     }
 
@@ -1787,6 +1826,7 @@ export class FpsMobaEngine {
       }
     } else if (e.button === 2) {
       this.rightMouseDown = false;
+      this.finishDrawingRealityWipe();
       if (this.isChargingPunch) {
         this.releaseChargedPunch();
       }
@@ -1838,6 +1878,203 @@ export class FpsMobaEngine {
     }
   }
 
+  private getPlayerRealityWipeCount(): number {
+    let n = 0;
+    for (const w of this.activeRealityWipes) {
+      if (w.casterId === 'player') n++;
+    }
+    return n;
+  }
+
+  private isRealityWipeActive(): boolean {
+    return this.getPlayerRealityWipeCount() > 0;
+  }
+
+  private triggerUroActionAnim(hint: HeroAnimHint, durationSec: number) {
+    if (this.hero.id !== 'uro') return;
+    this.ensurePlayerAvatar();
+    this.uroActionAnimHint = hint;
+    this.uroActionCamTimer = Math.max(this.uroActionCamTimer, durationSec);
+  }
+
+  private getUroCursorBrushPoint(): { point: THREE.Vector3; lookDir: THREE.Vector3 } {
+    const lookDir = new THREE.Vector3(
+      -Math.sin(this.yaw) * Math.cos(this.pitch),
+      Math.sin(this.pitch),
+      -Math.cos(this.yaw) * Math.cos(this.pitch)
+    ).normalize();
+    const eye = this.playerPos.clone().add(new THREE.Vector3(0, 1.42, 0));
+    return {
+      point: eye.addScaledVector(lookDir, 3.8),
+      lookDir
+    };
+  }
+
+  private removeRealityWipeAt(index: number) {
+    const w = this.activeRealityWipes[index];
+    if (!w) return;
+    this.scene.remove(w.controller.group);
+    w.controller.dispose();
+    this.activeRealityWipes.splice(index, 1);
+  }
+
+  private enforceCasterWipeCap(casterId: string, maxWipes = 3) {
+    while (true) {
+      const idx = this.activeRealityWipes.findIndex((w) => w.casterId === casterId);
+      let count = 0;
+      for (const w of this.activeRealityWipes) {
+        if (w.casterId === casterId) count++;
+      }
+      if (count <= maxWipes || idx === -1) break;
+      const oldWipe = this.activeRealityWipes[idx];
+      if (oldWipe && oldWipe.points.length > 0) {
+        const midPt = oldWipe.points[Math.floor(oldWipe.points.length / 2)].clone();
+        this.spawnThinIceShatterVfx(midPt, oldWipe.viewForward.clone(), 1.6, 0.42);
+      }
+      this.removeRealityWipeAt(idx);
+    }
+  }
+
+  private beginDrawingRealityWipe() {
+    const sec = this.hero.secondaryFire;
+    if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
+
+    // Finish any in-progress stroke first
+    this.finishDrawingRealityWipe();
+
+    this.consumeCursedEnergy(sec.manaCost ?? 16);
+    const { point, lookDir } = this.getUroCursorBrushPoint();
+    const ctrl = createDrawnRealityWipe([point.clone()], lookDir, 0.72);
+    this.scene.add(ctrl.group);
+
+    this.activeRealityWipes.push({
+      id: this.realityWipeIdCounter++,
+      casterId: 'player',
+      team: 'blue',
+      controller: ctrl,
+      points: [point.clone()],
+      viewForward: lookDir.clone(),
+      isDrawing: true,
+      drawElapsed: 0,
+      strokeLength: 0,
+      age: 0,
+      maxAge: 5.0
+    });
+    // Cap at 3 active Reality Wipes — oldest dissolves if drawing a 4th
+    this.enforceCasterWipeCap('player', 3);
+
+    this.viewModel.triggerCastGesture();
+  }
+
+  private finishDrawingRealityWipe() {
+    for (const w of this.activeRealityWipes) {
+      if (w.casterId === 'player' && w.isDrawing) {
+        w.isDrawing = false;
+        w.age = 0; // Stays at this exact spot for a full 5.0 seconds once drawn!
+        // If player quick-clicked without dragging far, synthesize a graceful 2.9m curved wipe stroke
+        if (w.strokeLength < 0.6) {
+          const center = w.points[0].clone();
+          const right = new THREE.Vector3().crossVectors(w.viewForward, new THREE.Vector3(0, 1, 0));
+          if (right.lengthSq() < 0.001) right.set(1, 0, 0);
+          right.normalize();
+          const up = new THREE.Vector3(0, 1, 0);
+          w.points = [
+            center.clone().addScaledVector(right, -1.4).addScaledVector(up, -0.28),
+            center.clone().addScaledVector(right, -0.45).addScaledVector(up, 0.14),
+            center.clone().addScaledVector(right, 0.45).addScaledVector(up, -0.08),
+            center.clone().addScaledVector(right, 1.4).addScaledVector(up, 0.26)
+          ];
+          w.controller.rebuild(w.points, w.viewForward);
+        }
+      }
+    }
+  }
+
+  private spawnNpcRealityWipe(u: MobaUnit, forwardDir: THREE.Vector3) {
+    const center = u.group.position.clone().add(new THREE.Vector3(0, 1.45, 0)).addScaledVector(forwardDir, 2.8);
+    const right = new THREE.Vector3().crossVectors(forwardDir, new THREE.Vector3(0, 1, 0));
+    if (right.lengthSq() < 0.001) right.set(1, 0, 0);
+    right.normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    const pts = [
+      center.clone().addScaledVector(right, -1.55).addScaledVector(up, -0.25),
+      center.clone().addScaledVector(right, -0.5).addScaledVector(up, 0.18),
+      center.clone().addScaledVector(right, 0.5).addScaledVector(up, -0.12),
+      center.clone().addScaledVector(right, 1.55).addScaledVector(up, 0.28)
+    ];
+    const ctrl = createDrawnRealityWipe(pts, forwardDir, 0.72);
+    this.scene.add(ctrl.group);
+    this.activeRealityWipes.push({
+      id: this.realityWipeIdCounter++,
+      casterId: u.id,
+      team: u.team,
+      controller: ctrl,
+      points: pts,
+      viewForward: forwardDir.clone(),
+      isDrawing: false,
+      drawElapsed: 0,
+      strokeLength: 3.1,
+      age: 0,
+      maxAge: 5.0
+    });
+    this.enforceCasterWipeCap(u.id, 3);
+  }
+
+  private distanceToWipePolyline(pos: THREE.Vector3, pts: THREE.Vector3[]): number {
+    if (pts.length === 0) return Infinity;
+    if (pts.length === 1) return pos.distanceTo(pts[0]);
+    let minDistSq = Infinity;
+    const ab = new THREE.Vector3();
+    const ap = new THREE.Vector3();
+    const closest = new THREE.Vector3();
+    for (let i = 0; i < pts.length - 1; i++) {
+      ab.copy(pts[i + 1]).sub(pts[i]);
+      const lenSq = ab.lengthSq();
+      if (lenSq < 0.00001) {
+        minDistSq = Math.min(minDistSq, pos.distanceToSquared(pts[i]));
+        continue;
+      }
+      ap.copy(pos).sub(pts[i]);
+      const t = THREE.MathUtils.clamp(ap.dot(ab) / lenSq, 0, 1);
+      closest.copy(pts[i]).addScaledVector(ab, t);
+      minDistSq = Math.min(minDistSq, pos.distanceToSquared(closest));
+    }
+    return Math.sqrt(minDistSq);
+  }
+
+  private updateRealityWipes(dt: number, elapsed: number) {
+    for (let i = this.activeRealityWipes.length - 1; i >= 0; i--) {
+      const w = this.activeRealityWipes[i];
+      if (w.isDrawing && w.casterId === 'player') {
+        if (!this.rightMouseDown || this.playerRespawnTimer > 0) {
+          this.finishDrawingRealityWipe();
+        } else {
+          w.drawElapsed += dt;
+          const { point, lookDir } = this.getUroCursorBrushPoint();
+          const last = w.points[w.points.length - 1];
+          const stepDist = point.distanceTo(last);
+          if (stepDist >= 0.16) {
+            w.points.push(point.clone());
+            w.strokeLength += stepDist;
+            w.viewForward.lerp(lookDir, 0.35).normalize();
+            w.controller.rebuild(w.points, w.viewForward);
+          }
+          if (w.strokeLength >= 6.8 || w.drawElapsed >= 0.78) {
+            w.isDrawing = false;
+            w.age = 0;
+          }
+        }
+      } else {
+        w.age += dt;
+      }
+
+      w.controller.update(dt, elapsed, w.age, w.maxAge);
+      if (!w.isDrawing && w.age >= w.maxAge) {
+        this.removeRealityWipeAt(i);
+      }
+    }
+  }
+
   private isBarrierActive(): boolean {
     if (this.playerRespawnTimer > 0 || !this.canSpendCursedEnergy() || this.teleportPhase !== 'NONE') return false;
     if (this.hero.abilities.E.kind === 'INFINITY_SHIELD') {
@@ -1853,12 +2090,17 @@ export class FpsMobaEngine {
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  Secondary Fire (M2): Barrier Shield, Charged Rocket Punch, Helix Rocket, or Two-Stage Lapse Blue Orb
+  //  Secondary Fire (M2): Barrier Shield, Drawn Reality Wipe, Rocket Punch, Helix Rocket, or Lapse Blue
   // ─────────────────────────────────────────────────────────────
   private startSecondaryFire() {
     if (this.playerRespawnTimer > 0 || this.winner || this.teleportPhase !== 'NONE' || this.meteorAiming) return;
     const sec = this.hero.secondaryFire;
     if (sec.kind === 'NONE') return;
+
+    if (sec.kind === 'REALITY_WIPE') {
+      this.beginDrawingRealityWipe();
+      return;
+    }
 
     if (sec.kind === 'DIVINE_DOGS') {
       if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
@@ -2115,7 +2357,10 @@ export class FpsMobaEngine {
     ) {
       return;
     }
-    if (this.isBarrierActive()) {
+    if (
+      this.isBarrierActive() &&
+      (this.hero.secondaryFire.kind !== 'REALITY_WIPE' || this.rightMouseDown)
+    ) {
       this.isChargingPrimary = false;
       this.primaryChargeMs = 0;
       return;
@@ -3019,17 +3264,19 @@ export class FpsMobaEngine {
         break;
       }
 
-      // ── URO TAKAKO: SKY PULL (grab the sky & yank yourself along 3D look direction) ──
+      // ── URO TAKAKO: SKY FLIGHT (grab the sky, surge in 3D, and enter controllable flight) ──
       case 'SKY_PULL': {
         const pullDir = forward.clone().normalize();
         // If standing on the floor and looking flat/slightly down, lift cleanly into the sky
-        if (this.grounded && pullDir.y < 0.28) {
-          pullDir.y = 0.34;
+        if (this.grounded && pullDir.y < 0.34) {
+          pullDir.y = 0.42;
           pullDir.normalize();
         }
         this.skyPullDir.copy(pullDir);
         this.skyPullTimer = Math.max(0.22, ab.durationMs / 1000);
-        this.skyPullBoostTimer = 0.65;
+        this.skyPullBoostTimer = 0.85;
+        this.uroFlightTimer = 2.6;
+        this.uroAerialSlamActive = false;
         this.grounded = false;
         const originRing = this.playerPos.clone().add(new THREE.Vector3(0, 1.1, 0));
         this.spawnImpactRing(originRing, ab.color, 3.6);
@@ -3037,7 +3284,7 @@ export class FpsMobaEngine {
         break;
       }
 
-      // ── URO TAKAKO: THIN ICE BREAKER (shatter the surface of the sky like thin ice) ──
+      // ── URO TAKAKO: THIN ICE BREAKER (Grounded: Reality-Warping Beam | In Flight: 3m Dive Slam) ──
       case 'THIN_ICE_BREAKER': {
         this.executeThinIceBreaker(ab, forward);
         break;
@@ -3064,72 +3311,176 @@ export class FpsMobaEngine {
     });
   }
 
-  private executeThinIceBreaker(ab: FpsAbilityDef, forward: THREE.Vector3) {
-    const rayOrigin = this.camera.position.clone();
-    const maxRange = 14.5;
-    let impactPos = rayOrigin.clone().addScaledVector(forward, 7.2);
-    let bestDist = maxRange;
+  private spawnRealityWarpBeamVfx(
+    startPos: THREE.Vector3,
+    endPos: THREE.Vector3,
+    radius = 0.72,
+    durationSec = 0.68
+  ) {
+    const beam = createRealityWarpBeamEffect(startPos, endPos, radius);
+    this.scene.add(beam.group);
+    this.vfxList.push({
+      mesh: beam.group,
+      age: 0,
+      maxAge: durationSec,
+      onUpdate: (dt, progress) => {
+        beam.update(dt, progress);
+      }
+    });
+  }
 
-    // 1. Check enemy Domain barriers first — Thin Ice Breaker deals 2x barrier-shatter damage!
+  private detonateUroAerialThinIceSlam() {
+    this.uroAerialSlamActive = false;
+    const blastRadius = 3.0; // Exact 3-meter aerial blast radius
+    const impactPos = this.playerPos.clone().add(new THREE.Vector3(0, 0.22, 0));
+    const inDomain = Boolean(this.activeDomain?.isUroDomain);
+
+    // Horizontal & vertical Thin Ice glass-shatter fractures at landing spot
+    this.spawnThinIceShatterVfx(impactPos, new THREE.Vector3(0, 1, 0), blastRadius * 1.15, 0.9);
+    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    this.spawnThinIceShatterVfx(impactPos.clone().add(new THREE.Vector3(0, 1.0, 0)), flatForward, blastRadius, 0.85);
+    this.spawnImpactRing(impactPos, '#67e8f9', blastRadius);
+    this.spawnCursedBurst(impactPos, 'SKY', blastRadius * 0.7, 92);
+    this.physicsWorld?.applyRadialImpulse(impactPos, blastRadius * 1.8, 52, 0.65, 160);
+
+    // 2x barrier-shatter damage if slamming onto an enemy Domain shell
+    const baseDmg = this.hero.abilities.E.damage || 115;
     for (const dom of this.activeDomains) {
       if (dom.isCollapsed || dom.casterTeam === 'blue') continue;
-      const hit = dom.raycastBarrier(rayOrigin, forward, bestDist);
-      if (hit && hit.distance < bestDist) {
-        bestDist = hit.distance;
-        impactPos = hit.point.clone();
-        const barrierDmg = Math.round((ab.damage + (this.level - 1) * 8) * 2.0);
-        this.damageDomainBarrier(dom, barrierDmg, hit.point, `${this.hero.name} (Thin Ice Breaker)`);
+      if (impactPos.distanceTo(dom.center) <= dom.radius + blastRadius) {
+        const barrierDmg = Math.round((baseDmg + 25 + (this.level - 1) * 8) * 2.0);
+        this.damageDomainBarrier(dom, barrierDmg, impactPos, `${this.hero.name} (Thin Ice Slam)`);
       }
     }
 
-    // 2. Snap to closest enemy unit along Uro's sightline within 14.5m
-    const targetMeshes = this.getEnemyHitMeshes();
-    if (targetMeshes.length > 0) {
-      const ray = new THREE.Raycaster(rayOrigin, forward, 0, bestDist);
-      const hits = ray.intersectObjects(targetMeshes, false);
-      if (hits.length > 0) {
-        bestDist = hits[0].distance;
-        impactPos = hits[0].point.clone();
-      }
-    }
-
-    // 3. Or snap to arena terrain/pillar surface
-    const worldRay = new THREE.Raycaster(rayOrigin, forward, 0, bestDist);
-    const worldHits = worldRay.intersectObjects(this.mapBuilder.raycastObstacles, false);
-    if (worldHits.length > 0 && worldHits[0].distance < bestDist) {
-      impactPos = worldHits[0].point.clone();
-    }
-
-    // Crystalline spatial fracture visuals + physics demolition
-    const inDomain = Boolean(this.activeDomain?.isUroDomain);
-    const shatterRadius = inDomain ? ab.radius * 1.25 : ab.radius;
-    this.spawnThinIceShatterVfx(impactPos, forward, shatterRadius, 0.78);
-    this.spawnImpactRing(impactPos, '#67e8f9', shatterRadius);
-    this.spawnCursedBurst(impactPos, 'SKY', shatterRadius * 0.45, 78);
-    this.physicsWorld?.applyRadialImpulse(impactPos, shatterRadius * 1.5, 42, 0.55, 140);
-
-    // Damage all enemies inside the fractured sky shockwave (bypasses NPC shields/guards!)
-    const dmg = Math.round((ab.damage + (this.level - 1) * 7) * (inDomain ? 1.25 : 1.0));
+    const slamDmg = Math.round((baseDmg + 25 + (this.level - 1) * 8) * (inDomain ? 1.25 : 1.0));
     let anyHit = false;
     for (const u of this.units) {
       if (!u.alive || u.team !== 'red') continue;
-      const uCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.5, 0));
-      const d = uCenter.distanceTo(impactPos);
-      if (d <= shatterRadius + u.radius) {
+      const dx = u.group.position.x - impactPos.x;
+      const dz = u.group.position.z - impactPos.z;
+      const horizDist = Math.hypot(dx, dz);
+      const vertDiff = Math.abs(u.group.position.y - this.playerPos.y);
+      if (horizDist <= blastRadius + u.radius && vertDiff <= 4.0) {
         anyHit = true;
-        // Pierces active NPC guard/shield
         if (u.npcShieldTimer && u.npcShieldTimer > 0) {
           u.npcShieldTimer = 0;
         }
-        this.damageUnit(u, dmg, d <= shatterRadius * 0.5, ab.name, uCenter, 'Thin Ice Breaker');
-        const pushDir = uCenter.clone().sub(impactPos);
-        if (pushDir.lengthSq() < 0.01) pushDir.copy(forward);
-        pushDir.y = 0;
+        u.stunTimer = Math.max(u.stunTimer ?? 0, 0.85);
+        const uCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.5, 0));
+        this.damageUnit(u, slamDmg, true, 'Thin Ice Breaker (Aerial Slam)', uCenter, 'Thin Ice Breaker');
+        const push = new THREE.Vector3(dx, 0, dz);
+        if (push.lengthSq() > 0.001) {
+          push.normalize();
+          this.KnockbackUnitWithWallSlam(u, push, 5.5, 22);
+        }
+        u.verticalVel = Math.max(u.verticalVel ?? 0, 7.5);
+      }
+    }
+    this.grantAbilityPassive(anyHit);
+  }
+
+  private executeThinIceBreaker(ab: FpsAbilityDef, forward: THREE.Vector3) {
+    const inFlight = !this.grounded || this.uroFlightTimer > 0;
+    this.triggerUroActionAnim('thin_ice_breaker', inFlight ? 1.85 : 2.15);
+
+    // ── MODE A: IN FLIGHT -> Dive down and crack anyone in a 3-meter blast radius ──
+    if (inFlight) {
+      this.uroFlightTimer = 0;
+      this.skyPullTimer = 0;
+      this.skyPullBoostTimer = 0;
+      this.isSkyHovering = false;
+      this.uroAerialSlamActive = true;
+
+      const diveForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+      const forwardBoost = forward.y < -0.15 ? 16.0 : 8.5;
+      this.playerVel.set(diveForward.x * forwardBoost, -40.0, diveForward.z * forwardBoost);
+      const startFlash = this.playerPos.clone().add(new THREE.Vector3(0, 1.2, 0));
+      this.spawnThinIceShatterVfx(startFlash, new THREE.Vector3(0, -1, 0), 2.2, 0.55);
+      this.spawnCursedBurst(startFlash, 'SKY', 1.5, 42);
+      return;
+    }
+
+    // ── MODE B: GROUNDED -> 0.83s windup synced to ThinIceBreaker strike frame, then fire beam ──
+    this.thinIcePendingAb = ab;
+    this.thinIceWindupTimer = 0.83;
+    const chargePos = this.playerPos.clone().add(new THREE.Vector3(0, 1.35, 0)).addScaledVector(forward, 1.15);
+    this.spawnImpactRing(chargePos, '#67e8f9', 2.0);
+    this.spawnCursedBurst(chargePos, 'SKY', 0.9, 24);
+  }
+
+  private releaseGroundedThinIceBeam(ab: FpsAbilityDef, forward: THREE.Vector3) {
+    const beamDir = forward.clone().normalize();
+    const beamOrigin = this.playerPos
+      .clone()
+      .add(new THREE.Vector3(0, 1.42, 0))
+      .addScaledVector(beamDir, 1.35);
+    const maxBeamRange = 28.0;
+    let beamLength = maxBeamRange;
+
+    // 1. Check enemy Domain barriers first — deals 2x barrier-shatter damage & stops on outer shell
+    for (const dom of this.activeDomains) {
+      if (dom.isCollapsed || dom.casterTeam === 'blue') continue;
+      const hit = dom.raycastBarrier(beamOrigin, beamDir, beamLength);
+      if (hit && hit.distance < beamLength) {
+        beamLength = hit.distance;
+        const barrierDmg = Math.round((ab.damage + (this.level - 1) * 8) * 2.0);
+        this.damageDomainBarrier(dom, barrierDmg, hit.point, `${this.hero.name} (Thin Ice Beam)`);
+      }
+    }
+
+    // 2. Clamp beam endpoint on solid world obstacles
+    const worldRay = new THREE.Raycaster(beamOrigin, beamDir, 0, beamLength);
+    const worldHits = worldRay.intersectObjects(this.mapBuilder.raycastObstacles, false);
+    if (worldHits.length > 0 && worldHits[0].distance < beamLength) {
+      beamLength = Math.max(1.2, worldHits[0].distance);
+    }
+
+    const beamEnd = beamOrigin.clone().addScaledVector(beamDir, beamLength);
+    const inDomain = Boolean(this.activeDomain?.isUroDomain);
+    const beamHitRadius = inDomain ? 1.65 : 1.35;
+
+    // Origin reality-crack glass fracture + outward spiraling Reality-Warping Beam + impact crack
+    this.spawnThinIceShatterVfx(beamOrigin, beamDir, 2.7, 0.78);
+    this.spawnRealityWarpBeamVfx(beamOrigin, beamEnd, inDomain ? 0.85 : 0.68, 0.72);
+    this.spawnThinIceShatterVfx(beamEnd, beamDir.clone().negate(), 2.2, 0.68);
+    this.spawnImpactRing(beamEnd, '#67e8f9', 2.8);
+    this.spawnCursedBurst(beamOrigin, 'SKY', 1.6, 52);
+    this.spawnCursedBurst(beamEnd, 'SKY', 1.8, 56);
+
+    // Demolish destructible physics objects along the Reality-Warping Beam
+    for (let d = 3.5; d <= beamLength; d += 5.5) {
+      const samplePt = beamOrigin.clone().addScaledVector(beamDir, d);
+      this.physicsWorld?.applyRadialImpulse(samplePt, 3.8, 34, 0.45, 95);
+    }
+    this.physicsWorld?.applyRadialImpulse(beamEnd, 4.5, 40, 0.5, 120);
+
+    // Pierce & crack all enemy units intersecting the beam cylinder
+    const dmg = Math.round((ab.damage + (this.level - 1) * 7) * (inDomain ? 1.25 : 1.0));
+    let anyHit = false;
+    const segVec = beamEnd.clone().sub(beamOrigin);
+    const segLenSq = Math.max(0.0001, segVec.lengthSq());
+
+    for (const u of this.units) {
+      if (!u.alive || u.team !== 'red') continue;
+      const uCenter = u.group.position.clone().add(new THREE.Vector3(0, u.height * 0.55, 0));
+      const t = THREE.MathUtils.clamp(uCenter.clone().sub(beamOrigin).dot(segVec) / segLenSq, 0, 1);
+      const closestPt = beamOrigin.clone().addScaledVector(segVec, t);
+      const distToBeam = uCenter.distanceTo(closestPt);
+
+      if (distToBeam <= beamHitRadius + u.radius) {
+        anyHit = true;
+        if (u.npcShieldTimer && u.npcShieldTimer > 0) {
+          u.npcShieldTimer = 0;
+        }
+        this.spawnThinIceShatterVfx(uCenter, beamDir, 1.9, 0.55);
+        this.damageUnit(u, dmg, distToBeam <= beamHitRadius * 0.55, 'Thin Ice Breaker (Beam)', uCenter, 'Thin Ice Breaker');
+        const pushDir = new THREE.Vector3(beamDir.x, 0, beamDir.z);
         if (pushDir.lengthSq() > 0.001) {
           pushDir.normalize();
-          this.KnockbackUnitWithWallSlam(u, pushDir, 6.5, 25);
+          this.KnockbackUnitWithWallSlam(u, pushDir, 6.0, 22);
         }
-        u.verticalVel = Math.max(u.verticalVel ?? 0, 5.5);
+        u.verticalVel = Math.max(u.verticalVel ?? 0, 4.5);
       }
     }
     this.grantAbilityPassive(anyHit);
@@ -3244,6 +3595,9 @@ export class FpsMobaEngine {
       isPlayerAlive: this.playerRespawnTimer <= 0
     });
     this.activeDomains.push(dom);
+    if (isUroDomain) {
+      this.triggerUroActionAnim('domain_expansion', 2.15);
+    }
     if (isGojoDomain) {
       if (this.playerDomainAudio) {
         try { this.playerDomainAudio.stop(); } catch {}
@@ -4483,8 +4837,30 @@ export class FpsMobaEngine {
       );
       this.grounded = false;
     }
+    if (this.uroFlightTimer > 0) {
+      this.uroFlightTimer = Math.max(0, this.uroFlightTimer - dt);
+    }
+    if (this.uroAerialSlamActive) {
+      // Plunge rapidly downward until ground touchdown triggers the 3m Thin Ice Breaker slam!
+      this.playerVel.y = Math.min(this.playerVel.y, -40.0);
+    }
     if (this.skyDeflectCounterCooldown > 0) {
       this.skyDeflectCounterCooldown = Math.max(0, this.skyDeflectCounterCooldown - dt);
+    }
+    if (this.thinIceWindupTimer > 0) {
+      this.thinIceWindupTimer = Math.max(0, this.thinIceWindupTimer - dt);
+      if (this.thinIceWindupTimer <= 0 && this.thinIcePendingAb) {
+        const pendingAb = this.thinIcePendingAb;
+        this.thinIcePendingAb = null;
+        if (this.playerRespawnTimer <= 0 && !this.winner) {
+          const aimForward = new THREE.Vector3(
+            -Math.sin(this.yaw) * Math.cos(this.pitch),
+            Math.sin(this.pitch),
+            -Math.cos(this.yaw) * Math.cos(this.pitch)
+          ).normalize();
+          this.releaseGroundedThinIceBeam(pendingAb, aimForward);
+        }
+      }
     }
     if (this.teleportPhase !== 'NONE' || this.meteorAiming) {
       // Movement is locked while aiming Limitless Teleport or Maximum: Meteor
@@ -4538,14 +4914,27 @@ export class FpsMobaEngine {
     }
 
     this.isSkyHovering = false;
-    if (!isNueCarrying && !isSkyPulling) {
+    if (!isNueCarrying && !isSkyPulling && !this.uroAerialSlamActive) {
       if (this.keys.has('Space') && this.grounded && this.teleportPhase === 'NONE' && !this.meteorAiming) {
-        this.playerVel.y = this.hero.id === 'uro' ? 13.0 : 11.2;
+        this.playerVel.y = this.hero.id === 'uro' ? 13.5 : 11.2;
         this.grounded = false;
       }
 
       const uroInDomain = this.hero.id === 'uro' && Boolean(this.activeDomain?.isUroDomain);
       if (
+        this.hero.id === 'uro' &&
+        !this.grounded &&
+        this.uroFlightTimer > 0 &&
+        this.teleportPhase === 'NONE' &&
+        !this.meteorAiming &&
+        this.playerVel.y <= 3.5
+      ) {
+        // Active Sky Flight from [SHIFT]: buoyant 3D hover/flight (aim up + W or hold SPACE to climb)
+        this.isSkyHovering = true;
+        const wantClimb = this.keys.has('Space') || (moveForward > 0 && Math.sin(this.pitch) > 0.18);
+        const targetVy = wantClimb ? 5.2 : -0.6;
+        this.playerVel.y = THREE.MathUtils.lerp(this.playerVel.y, targetVy, Math.min(1, dt * 8));
+      } else if (
         this.hero.id === 'uro' &&
         !this.grounded &&
         this.keys.has('Space') &&
@@ -4596,12 +4985,17 @@ export class FpsMobaEngine {
     this.playerPos.y = Math.min(48, this.playerPos.y + this.playerVel.y * dt);
     const floorY = this.mapBuilder.getFloorHeight(this.playerPos.x, this.playerPos.z, this.playerPos.y);
     if (this.playerPos.y <= floorY) {
+      const wasAerialSlam = this.uroAerialSlamActive;
       this.playerPos.y = floorY;
       this.playerVel.y = 0;
       this.grounded = true;
       this.rabbitLaunchBoostTimer = 0;
       this.skyPullBoostTimer = 0;
+      this.uroFlightTimer = 0;
       this.isSkyHovering = false;
+      if (wasAerialSlam) {
+        this.detonateUroAerialThinIceSlam();
+      }
       if (this.nueCarryTimer <= 0) {
         this.nueCarryAvailable = false;
       }
@@ -4931,10 +5325,22 @@ export class FpsMobaEngine {
           } else {
             this.clampUnitToDomainBarrier(u);
           }
-          u.animateRig?.(elapsed, movingNow, false, phase);
+          if (u.animOverrideTimer && u.animOverrideTimer > 0) {
+            u.animOverrideTimer = Math.max(0, u.animOverrideTimer - dt);
+          }
+          const activeAnimHint =
+            u.animOverrideTimer && u.animOverrideTimer > 0 && u.animOverrideHint
+              ? u.animOverrideHint
+              : phase;
+          u.animateRig?.(elapsed, movingNow, false, activeAnimHint);
           this.updateNpcHeroAbilities(u, dt, elapsed);
         } else {
-          u.animateRig?.(elapsed, false, false);
+          if (u.animOverrideTimer && u.animOverrideTimer > 0) {
+            u.animOverrideTimer = Math.max(0, u.animOverrideTimer - dt);
+          }
+          const activeAnimHint =
+            u.animOverrideTimer && u.animOverrideTimer > 0 ? u.animOverrideHint : undefined;
+          u.animateRig?.(elapsed, false, false, activeAnimHint);
           this.updateNpcHeroAbilities(u, dt, elapsed);
         }
         continue;
@@ -5574,6 +5980,22 @@ export class FpsMobaEngine {
       return;
     }
 
+    if (u.npcDelayedBeam) {
+      u.npcDelayedBeam.timer -= dt;
+      if (u.npcDelayedBeam.timer <= 0) {
+        const dir = u.npcDelayedBeam.dir;
+        u.npcDelayedBeam = undefined;
+        const beamOrigin = u.group.position.clone().add(new THREE.Vector3(0, 1.35, 0));
+        const beamStart = beamOrigin.clone().addScaledVector(dir, 1.2);
+        const beamEnd = beamStart.clone().addScaledVector(dir, 16.5);
+        this.spawnThinIceShatterVfx(beamStart, dir, 2.5, 0.78);
+        this.spawnRealityWarpBeamVfx(beamStart, beamEnd, 0.65, 0.72);
+        this.spawnThinIceShatterVfx(beamEnd, dir.clone().negate(), 2.0, 0.68);
+        this.spawnCursedBurst(beamEnd, 'SKY', 1.7, 48);
+        this.physicsWorld?.applyRadialImpulse(beamEnd, 4.2, 30, 0.45, 75);
+      }
+    }
+
     u.npcAbilityTimer = (u.npcAbilityTimer ?? 3.0) - dt;
     if (u.npcAbilityTimer > 0) return;
 
@@ -5837,46 +6259,56 @@ export class FpsMobaEngine {
       return;
     }
 
-    // ── 3b. URO TAKAKO SHOWCASE: Sky-Warping Palm Strikes, Sky Pull, Sky Veil Deflect, Thin Ice Breaker ──
+    // ── 3b. URO TAKAKO SHOWCASE: Drawn Reality Wipe, Grounded Thin Ice Beam, Sky Flight + 3m Slam, Domain Anim ──
     if (hero.id === 'uro') {
       if (stepIndex === 0) {
-        u.npcAbilityTimer = 2.8;
-        const slashPos = u.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)).addScaledVector(flatDir, 2.8);
-        this.spawnMeleeArcVfx(slashPos, 4.4, '#67e8f9');
-        this.spawnCursedBurst(slashPos, 'SKY', 1.4, 28);
+        // Draws a persistent 5s smoky Reality Wipe ribbon in front of her + plays RealityWipe animation
+        u.npcAbilityTimer = 3.2;
+        u.animOverrideHint = 'reality_wipe';
+        u.animOverrideTimer = 1.65;
+        this.spawnNpcRealityWipe(u, flatDir);
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)), '#67e8f9', 3.0);
       } else if (stepIndex === 1) {
-        u.npcAbilityTimer = 3.6;
+        // Grounded Thin Ice Breaker: 0.83s windup synced to ThinIceBreaker strike frame, then fires Reality-Warping Beam
+        u.npcAbilityTimer = 4.4;
+        u.animOverrideHint = 'thin_ice_breaker';
+        u.animOverrideTimer = 2.25;
+        u.npcDelayedBeam = { timer: 0.83, dir: flatDir.clone() };
+        this.spawnImpactRing(origin.clone().addScaledVector(flatDir, 1.0), '#67e8f9', 1.8);
+      } else if (stepIndex === 2) {
+        // Sky Flight leap -> airborne Thin Ice Breaker dive cracking a 3m blast radius
+        u.npcAbilityTimer = 4.0;
+        u.animOverrideHint = 'thin_ice_breaker';
+        u.animOverrideTimer = 2.4;
         const startPos = u.group.position.clone().add(new THREE.Vector3(0, 1.2, 0));
-        const dashDist = 9.0;
         const res = this.mapBuilder.resolveHorizontalCollision(
-          u.group.position.x + flatDir.x * dashDist,
-          u.group.position.z + flatDir.z * dashDist,
+          u.group.position.x + flatDir.x * 7.5,
+          u.group.position.z + flatDir.z * 7.5,
           u.radius,
           u.group.position.y
         );
         u.group.position.x = res.x;
         u.group.position.z = res.z;
-        u.verticalVel = 14.5;
+        u.verticalVel = 15.5;
         u.group.position.y = Math.max(u.group.position.y, 0.25);
         this.clampUnitToDomainBarrier(u);
-        const endPos = u.group.position.clone().add(new THREE.Vector3(0, 2.2, 0));
-        this.spawnBeamTracer(startPos, endPos, '#67e8f9', 0.36, 0.16);
-        this.spawnImpactRing(startPos, '#67e8f9', 3.4);
-        this.spawnCursedBurst(endPos, 'SKY', 1.8, 36);
-      } else if (stepIndex === 2) {
-        u.npcAbilityTimer = 3.4;
-        u.npcShieldTimer = 2.4;
-        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)), '#67e8f9', 3.6);
-      } else {
-        u.npcAbilityTimer = 4.6;
-        const shatterPos = origin.clone().addScaledVector(flatDir, 5.2);
-        this.spawnThinIceShatterVfx(shatterPos, flatDir, 5.8, 0.85);
-        this.spawnImpactRing(shatterPos, '#bae6fd', 5.8);
-        this.spawnCursedBurst(shatterPos, 'SKY', 2.4, 64);
-        this.physicsWorld?.applyRadialImpulse(shatterPos, 9.0, 34, 0.55, 85);
+        const slamGround = new THREE.Vector3(res.x, 0.22, res.z);
+        this.spawnBeamTracer(startPos, slamGround.clone().add(new THREE.Vector3(0, 3.8, 0)), '#67e8f9', 0.35, 0.16);
+        this.spawnThinIceShatterVfx(slamGround, new THREE.Vector3(0, 1, 0), 3.0, 0.9);
+        this.spawnImpactRing(slamGround, '#bae6fd', 3.0);
+        this.spawnCursedBurst(slamGround, 'SKY', 2.0, 62);
+        this.physicsWorld?.applyRadialImpulse(slamGround, 4.8, 36, 0.55, 90);
         if (this.aiAttackingEnabled) {
-          this.damageTargetsAroundNpc(u, shatterPos, 5.8, 28, 'Thin Ice Breaker');
+          this.damageTargetsAroundNpc(u, slamGround, 3.0, 28, 'Thin Ice Breaker (Aerial Slam)');
         }
+      } else {
+        // Domain Expansion animation showcase
+        u.npcAbilityTimer = 4.6;
+        u.animOverrideHint = 'domain_expansion';
+        u.animOverrideTimer = 2.15;
+        const burstOrigin = u.group.position.clone().add(new THREE.Vector3(0, 1.35, 0));
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.2, 0)), '#67e8f9', 5.2);
+        this.spawnCursedBurst(burstOrigin, 'SKY', 2.4, 58);
       }
       return;
     }
@@ -6057,7 +6489,11 @@ export class FpsMobaEngine {
       const absorbedByBarrier = Math.min(this.barrierHp, remaining);
       this.barrierHp -= absorbedByBarrier;
       remaining -= absorbedByBarrier;
-      if (this.hero.secondaryFire.kind === 'SKY_DEFLECT' && this.skyDeflectCounterCooldown <= 0) {
+      if (
+        (this.hero.secondaryFire.kind === 'SKY_DEFLECT' ||
+          this.hero.secondaryFire.kind === 'REALITY_WIPE') &&
+        this.skyDeflectCounterCooldown <= 0
+      ) {
         this.skyDeflectCounterCooldown = 0.55;
         this.grantAbilityPassive(true);
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
@@ -6069,7 +6505,7 @@ export class FpsMobaEngine {
           x: 50,
           y: 42,
           amount: 0,
-          label: 'SKY VEIL DEFLECT',
+          label: 'REALITY WIPE DEFLECT',
           isCrit: true,
           color: '#67e8f9',
           ageSec: 0,
@@ -6170,41 +6606,42 @@ export class FpsMobaEngine {
 
   private updateProjectiles(dt: number) {
     const ctx = this.getProjectileContext();
-
-    // Uro Takako Sky Veil Deflect (Hold Right Click): catch & redirect enemy projectiles along crosshair
-    const uroSkyDeflectActive =
-      this.playerRespawnTimer <= 0 &&
-      this.hero.secondaryFire.kind === 'SKY_DEFLECT' &&
-      this.isBarrierActive();
-    const uroLookDir = uroSkyDeflectActive
-      ? new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize()
-      : null;
-    const uroCenter = uroSkyDeflectActive
-      ? this.playerPos.clone().add(new THREE.Vector3(0, 1.35, 0))
-      : null;
+    const playerLookDir = new THREE.Vector3(
+      -Math.sin(this.yaw) * Math.cos(this.pitch),
+      Math.sin(this.pitch),
+      -Math.cos(this.yaw) * Math.cos(this.pitch)
+    ).normalize();
 
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
-      if (uroSkyDeflectActive && uroLookDir && uroCenter && p.alive && p.team === 'red') {
-        const toProj = p.position.clone().sub(uroCenter);
-        const dist = toProj.length();
-        if (dist <= 4.8 + p.radius && (dist < 1.8 || toProj.normalize().dot(uroLookDir) >= 0.25)) {
-          if (p.deflect('blue', uroLookDir, 'player', `${this.hero.name} (Sky Deflect)`, 1.35)) {
-            this.grantAbilityPassive(true);
-            this.spawnImpactRing(p.position.clone(), '#67e8f9', 3.4);
-            this.spawnCursedBurst(p.position.clone(), 'SKY', 1.6, 36);
-            this.damagePopups.push({
-              id: this.popupCounter++,
-              x: 50,
-              y: 38,
-              amount: 0,
-              label: 'SKY DEFLECTED!',
-              isCrit: true,
-              color: '#67e8f9',
-              ageSec: 0,
-              opacity: 1
-            });
-            if (this.damagePopups.length > 10) this.damagePopups.shift();
+      if (p.alive && this.activeRealityWipes.length > 0) {
+        for (const w of this.activeRealityWipes) {
+          if (w.team === p.team) continue;
+          const dist = this.distanceToWipePolyline(p.position, w.points);
+          if (dist <= 1.35 + p.radius) {
+            const redirectDir = w.casterId === 'player' ? playerLookDir : w.viewForward;
+            const deflectName =
+              w.casterId === 'player' ? `${this.hero.name} (Reality Wipe)` : 'Uro Takako (Reality Wipe)';
+            if (p.deflect(w.team, redirectDir, w.casterId, deflectName, 1.4)) {
+              this.spawnImpactRing(p.position.clone(), '#67e8f9', 3.2);
+              this.spawnCursedBurst(p.position.clone(), 'SKY', 1.5, 34);
+              if (w.casterId === 'player') {
+                this.grantAbilityPassive(true);
+                this.damagePopups.push({
+                  id: this.popupCounter++,
+                  x: 50,
+                  y: 38,
+                  amount: 0,
+                  label: 'REALITY WIPE DEFLECT!',
+                  isCrit: true,
+                  color: '#67e8f9',
+                  ageSec: 0,
+                  opacity: 1
+                });
+                if (this.damagePopups.length > 10) this.damagePopups.shift();
+              }
+              break;
+            }
           }
         }
       }
@@ -6239,6 +6676,7 @@ export class FpsMobaEngine {
 
   private updateVfx(dt: number) {
     const elapsed = this.clock.getElapsedTime();
+    this.updateRealityWipes(dt, elapsed);
     this.updateProjectiles(dt);
     this.updateVolcanoes(dt, elapsed);
     this.updateLowHpTrackers(elapsed);
@@ -6359,6 +6797,9 @@ export class FpsMobaEngine {
         this.activeDomain?.isUroDomain && !this.activeDomain.purpleTriggered
       ),
       isSkyHovering: this.isSkyHovering,
+      isUroFlying: this.hero.id === 'uro' && (!this.grounded || this.uroFlightTimer > 0),
+      isRealityWiping: this.isRealityWipeActive(),
+      activeRealityWipes: this.getPlayerRealityWipeCount(),
       isShadowStepping: this.shadowStepTimer > 0,
       shadowStepRemainingSec: Number(Math.max(0, this.shadowStepTimer).toFixed(1)),
       canNueCarry: this.nueCarryAvailable && !this.grounded && this.nueCarryTimer <= 0,
@@ -6408,6 +6849,9 @@ export class FpsMobaEngine {
       this.scene.remove(this.shadowPuddleMesh);
       this.shadowPuddleMesh.geometry.dispose();
       this.shadowPuddleMesh = null;
+    }
+    while (this.activeRealityWipes.length > 0) {
+      this.removeRealityWipeAt(0);
     }
     for (const marker of this.lowHpTrackers.values()) {
       this.scene.remove(marker);

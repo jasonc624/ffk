@@ -1784,4 +1784,482 @@ export function createSkyVeilDomainVfx(
   return { root, update };
 }
 
+export interface RealityWarpBeamController {
+  group: THREE.Group;
+  update: (dt: number, progress: number) => void;
+}
+
+/**
+ * Uro Takako's grounded Thin Ice Breaker: cracks reality at origin and fires a pure
+ * reality-warping refraction beam outwards that bends the view of whatever is behind it.
+ */
+export function createRealityWarpBeamEffect(
+  startPos: THREE.Vector3,
+  endPos: THREE.Vector3,
+  radius = 0.65
+): RealityWarpBeamController {
+  const group = new THREE.Group();
+  const delta = endPos.clone().sub(startPos);
+  const length = Math.max(0.5, delta.length());
+  const mid = startPos.clone().addScaledVector(delta, 0.5);
+  const dir = delta.clone().normalize();
+
+  group.position.copy(mid);
+  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+  group.quaternion.copy(quat);
+
+  const warpNormalMap = getRealityWipeNormalMap().clone();
+  warpNormalMap.repeat.set(2.5, Math.max(2.0, length * 0.45));
+  warpNormalMap.needsUpdate = true;
+
+  // 1. Pure transmissive spatial-refraction cylinder: warps the view of the arena behind the beam!
+  const beamGeo = new THREE.CylinderGeometry(radius, radius * 0.9, length, 24, 1, true);
+  beamGeo.computeTangents();
+  const beamMat = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0xffffff),
+    transmission: 1.0,
+    ior: 1.5,
+    thickness: 2.2,
+    roughness: 0.0,
+    metalness: 0.0,
+    reflectivity: 0.12,
+    envMapIntensity: 0.18,
+    attenuationColor: new THREE.Color(0xffffff),
+    attenuationDistance: 100.0,
+    normalMap: warpNormalMap,
+    normalScale: new THREE.Vector2(1.3, 1.3),
+    transparent: false,
+    side: THREE.DoubleSide
+  });
+
+  const outerBeam = new THREE.Mesh(beamGeo, beamMat);
+  group.add(outerBeam);
+
+  // 2. Subtle hairline spatial-crack rings traveling along the beam
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: 0xe0f2fe,
+    transparent: true,
+    opacity: 0.32,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const rings: THREE.Mesh[] = [];
+  const ringCount = Math.max(4, Math.min(8, Math.floor(length / 3.8)));
+  const ringGeo = new THREE.RingGeometry(radius * 0.92, radius * 1.04, 24);
+  ringGeo.rotateX(Math.PI / 2);
+  for (let i = 0; i < ringCount; i++) {
+    const rMesh = new THREE.Mesh(ringGeo, ringMat);
+    const frac = (i + 0.5) / ringCount - 0.5;
+    rMesh.position.y = frac * length;
+    group.add(rMesh);
+    rings.push(rMesh);
+  }
+
+  const update = (dt: number, progress: number) => {
+    warpNormalMap.offset.y -= dt * 3.8;
+    warpNormalMap.offset.x += dt * 1.4;
+    const taperScale = Math.max(0.02, 1.0 - Math.pow(progress, 1.6));
+    outerBeam.scale.set(taperScale, 1.0, taperScale);
+    beamMat.transmission = 1.0 - progress * 0.5;
+    ringMat.opacity = (1.0 - progress) * 0.32;
+    for (let i = 0; i < rings.length; i++) {
+      const r = rings[i];
+      r.position.y += dt * 16.0;
+      if (r.position.y > length * 0.5) {
+        r.position.y -= length;
+      }
+      r.scale.setScalar(taperScale * (1.0 + (i % 2) * 0.15));
+    }
+  };
+
+  return { group, update };
+}
+
+export interface DrawnRealityWipeController {
+  group: THREE.Group;
+  rebuild: (points: THREE.Vector3[], viewForward: THREE.Vector3) => void;
+  update: (dt: number, elapsed: number, age: number, maxAge: number) => void;
+  dispose: () => void;
+}
+
+let cachedRealityWipeNormalMap: THREE.DataTexture | null = null;
+function getRealityWipeNormalMap(): THREE.DataTexture {
+  if (cachedRealityWipeNormalMap) return cachedRealityWipeNormalMap;
+  const size = 64;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = (x / size) * Math.PI * 2;
+      const v = (y / size) * Math.PI * 2;
+      // Smooth tileable liquid-mirror spatial lens ripples
+      const nx =
+        Math.sin(u * 2.0 + v) * 0.45 +
+        Math.cos(u - v * 2.0) * 0.35 +
+        Math.sin(u * 3.0 - v * 2.0) * 0.2;
+      const ny =
+        Math.cos(v * 2.0 - u) * 0.45 +
+        Math.sin(u * 2.0 + v * 2.0) * 0.35 +
+        Math.cos(v * 3.0 + u) * 0.2;
+      const nz = Math.sqrt(Math.max(0.15, 1.0 - nx * nx * 0.45 - ny * ny * 0.45));
+      const idx = (y * size + x) * 4;
+      data[idx] = Math.min(255, Math.max(0, Math.floor((nx * 0.5 + 0.5) * 255)));
+      data[idx + 1] = Math.min(255, Math.max(0, Math.floor((ny * 0.5 + 0.5) * 255)));
+      data[idx + 2] = Math.min(255, Math.max(0, Math.floor((nz * 0.5 + 0.5) * 255)));
+      data[idx + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(3.2, 1.4);
+  tex.needsUpdate = true;
+  cachedRealityWipeNormalMap = tex;
+  return tex;
+}
+
+/**
+ * Uro Takako's Drawn Reality Wipe: a pure view-dependent spatial refraction lens
+ * painted directly along the player's cursor drag path that bends and warps the
+ * view of whatever is on the other side based on the observer's angle.
+ */
+export function createDrawnRealityWipe(
+  initialPoints: THREE.Vector3[],
+  initialViewForward: THREE.Vector3,
+  halfWidth = 0.72
+): DrawnRealityWipeController {
+  const group = new THREE.Group();
+
+  const warpNormalMap = getRealityWipeNormalMap().clone();
+  warpNormalMap.needsUpdate = true;
+
+  // Pure view-dependent screen-space refraction lens: 100% clear view of the other side,
+  // strongly warped by the 3D curved lens normals and scrolling spatial wave normal map.
+  const ribbonMat = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0xffffff),
+    transmission: 1.0,
+    ior: 1.52,
+    thickness: 2.6,
+    roughness: 0.0,
+    metalness: 0.0,
+    reflectivity: 0.14,
+    envMapIntensity: 0.2,
+    clearcoat: 0.0,
+    iridescence: 0.0,
+    attenuationColor: new THREE.Color(0xffffff),
+    attenuationDistance: 100.0,
+    normalMap: warpNormalMap,
+    normalScale: new THREE.Vector2(1.25, 1.25),
+    transparent: false,
+    opacity: 1.0,
+    side: THREE.DoubleSide
+  });
+
+  // Ultra-faint view-dependent grazing Fresnel contour while active, plus spiderweb
+  // thin-ice fracture lines that spread across the lens right before it shatters.
+  const sheenMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uFade: { value: 1.0 },
+      uCrackProgress: { value: 0.0 }
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vViewPos;
+      void main() {
+        vUv = uv;
+        vNormal = normalize(normalMatrix * normal);
+        vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+        vViewPos = -mvPos.xyz;
+        gl_Position = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform float uFade;
+      uniform float uCrackProgress;
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vViewPos;
+      ${VOLCANIC_NOISE_GLSL}
+      void main() {
+        vec3 N = normalize(vNormal);
+        vec3 V = normalize(vViewPos);
+        float fresnel = pow(1.0 - abs(dot(N, V)), 4.5);
+
+        float edgeDist = abs(vUv.y * 2.0 - 1.0);
+        float borderRim = smoothstep(0.92, 0.995, edgeDist) * (1.0 - smoothstep(0.995, 1.0, edgeDist));
+        float tipFade = smoothstep(0.0, 0.06, vUv.x) * (1.0 - smoothstep(0.94, 1.0, vUv.x));
+
+        // Spiderweb spatial fracture lines when the wipe is about to shatter
+        float crackAlpha = 0.0;
+        if (uCrackProgress > 0.001) {
+          vec3 cp = vec3(vUv.x * 14.0, vUv.y * 6.5, 1.7);
+          float n1 = fbm(cp);
+          float n2 = fbm(cp * 2.3 + vec3(3.1));
+          float line1 = smoothstep(0.065 * uCrackProgress, 0.0, abs(n1 - 0.5));
+          float line2 = smoothstep(0.045 * uCrackProgress, 0.0, abs(n2 - 0.5));
+          crackAlpha = clamp((line1 + line2 * 0.85) * uCrackProgress, 0.0, 0.95);
+        }
+
+        float baseAlpha = (borderRim * 0.18 + fresnel * 0.12) * tipFade * uFade;
+        float alpha = clamp(baseAlpha + crackAlpha * tipFade, 0.0, 0.95);
+        if (alpha <= 0.005) discard;
+
+        vec3 col = mix(vec3(0.94, 0.98, 1.0), vec3(1.0, 1.0, 1.0), crackAlpha);
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending
+  });
+
+  const geo = new THREE.BufferGeometry();
+  const ribbonMesh = new THREE.Mesh(geo, ribbonMat);
+  ribbonMesh.frustumCulled = false;
+  const sheenMesh = new THREE.Mesh(geo, sheenMat);
+  sheenMesh.frustumCulled = false;
+  group.add(ribbonMesh, sheenMesh);
+
+  // Shatter shard burst spawned in-place along the ribbon curve during the final 0.45s
+  const shardGeo = new THREE.OctahedronGeometry(0.18, 0);
+  shardGeo.scale(1.45, 0.52, 0.14);
+  shardGeo.computeTangents();
+  const shardGroup = new THREE.Group();
+  shardGroup.visible = false;
+  group.add(shardGroup);
+
+  interface WipeShatterShard {
+    mesh: THREE.Mesh;
+    origin: THREE.Vector3;
+    vel: THREE.Vector3;
+    rotOrigin: THREE.Euler;
+    rotVel: THREE.Vector3;
+    baseScale: number;
+  }
+  const shards: WipeShatterShard[] = [];
+  const shardCount = 22;
+  for (let i = 0; i < shardCount; i++) {
+    const m = new THREE.Mesh(shardGeo, ribbonMat);
+    m.frustumCulled = false;
+    shardGroup.add(m);
+    shards.push({
+      mesh: m,
+      origin: new THREE.Vector3(),
+      vel: new THREE.Vector3(),
+      rotOrigin: new THREE.Euler(),
+      rotVel: new THREE.Vector3(),
+      baseScale: 1.0
+    });
+  }
+
+  let latestCurvePts: THREE.Vector3[] = [];
+  let latestViewFwd = initialViewForward.clone().normalize();
+  let shatterTriggered = false;
+
+  const triggerShatter = () => {
+    shatterTriggered = true;
+    ribbonMesh.visible = false;
+    sheenMesh.visible = false;
+    shardGroup.visible = true;
+
+    const pts = latestCurvePts.length > 0 ? latestCurvePts : [new THREE.Vector3()];
+    const right = new THREE.Vector3().crossVectors(latestViewFwd, new THREE.Vector3(0, 1, 0));
+    if (right.lengthSq() < 0.001) right.set(1, 0, 0);
+    right.normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+
+    for (let i = 0; i < shards.length; i++) {
+      const s = shards[i];
+      const u = (i + 0.5) / shards.length;
+      const ptIdx = Math.min(pts.length - 1, Math.floor(u * pts.length));
+      const basePt = pts[ptIdx];
+      const lat = ((i % 5) / 2 - 1) * halfWidth * 0.78;
+      const depthJitter = (((i * 7) % 5) / 2 - 1) * 0.08;
+
+      s.origin
+        .copy(basePt)
+        .addScaledVector(up, lat)
+        .addScaledVector(latestViewFwd, depthJitter);
+      s.mesh.position.copy(s.origin);
+
+      // Burst outward in place from the ribbon plane + fall with gravity
+      const outSign = i % 2 === 0 ? 1 : -1;
+      s.vel
+        .copy(up)
+        .multiplyScalar(lat * 3.4 + (Math.sin(i * 4.1) * 1.4))
+        .addScaledVector(right, Math.cos(i * 2.7) * 2.2)
+        .addScaledVector(latestViewFwd, outSign * (1.2 + (i % 3) * 0.7));
+
+      s.rotOrigin.set(i * 1.1, i * 1.7, i * 0.8);
+      s.mesh.rotation.copy(s.rotOrigin);
+      s.rotVel.set(
+        (i % 2 === 0 ? 1 : -1) * (5.5 + (i % 4) * 1.8),
+        (i % 3 === 0 ? 1 : -1) * (6.2 + (i % 3) * 2.1),
+        (i % 2 === 1 ? 1 : -1) * (4.8 + (i % 5) * 1.5)
+      );
+      s.baseScale = 0.75 + (i % 4) * 0.24;
+      s.mesh.scale.setScalar(s.baseScale);
+    }
+  };
+
+  const rebuild = (rawPts: THREE.Vector3[], viewForward: THREE.Vector3) => {
+    if (rawPts.length === 0) return;
+
+    // Resample / smooth stroke via CatmullRomCurve3 (or synthesize short stroke if 1 point)
+    let samplePts: THREE.Vector3[];
+    if (rawPts.length === 1) {
+      const right = new THREE.Vector3().crossVectors(viewForward, new THREE.Vector3(0, 1, 0));
+      if (right.lengthSq() < 0.001) right.set(1, 0, 0);
+      right.normalize();
+      samplePts = [
+        rawPts[0].clone().addScaledVector(right, -0.35),
+        rawPts[0].clone(),
+        rawPts[0].clone().addScaledVector(right, 0.35)
+      ];
+    } else if (rawPts.length === 2) {
+      const mid = rawPts[0].clone().lerp(rawPts[1], 0.5);
+      samplePts = [rawPts[0].clone(), mid, rawPts[1].clone()];
+    } else {
+      samplePts = rawPts;
+    }
+
+    const curve = new THREE.CatmullRomCurve3(samplePts, false, 'catmullrom', 0.35);
+    const segs = Math.max(18, Math.min(48, samplePts.length * 5));
+    const curvePts = curve.getPoints(segs);
+    latestCurvePts = curvePts;
+    latestViewFwd.copy(viewForward).normalize();
+    if (latestViewFwd.lengthSq() < 0.001) latestViewFwd.set(0, 0, -1);
+
+    // 5 vertices across width so the cross-section curves like a 3D convex spatial lens
+    const crossCols = 5;
+    const vertCount = (segs + 1) * crossCols;
+    const positions = new Float32Array(vertCount * 3);
+    const normals = new Float32Array(vertCount * 3);
+    const uvs = new Float32Array(vertCount * 2);
+    const indices: number[] = [];
+
+    const fwd = viewForward.clone().normalize();
+    if (fwd.lengthSq() < 0.001) fwd.set(0, 0, -1);
+    const tangent = new THREE.Vector3();
+    const binormal = new THREE.Vector3();
+    const normalVec = new THREE.Vector3();
+
+    for (let i = 0; i <= segs; i++) {
+      const u = i / segs;
+      const p = curvePts[i];
+      if (i < segs) {
+        tangent.copy(curvePts[i + 1]).sub(p);
+      } else {
+        tangent.copy(p).sub(curvePts[i - 1]);
+      }
+      if (tangent.lengthSq() < 0.00001) tangent.set(1, 0, 0);
+      tangent.normalize();
+
+      // Cross tangent with viewForward so the lens ribbon always faces the viewer cleanly
+      binormal.crossVectors(tangent, fwd);
+      if (binormal.lengthSq() < 0.0001) {
+        binormal.crossVectors(tangent, new THREE.Vector3(0, 1, 0));
+      }
+      if (binormal.lengthSq() < 0.0001) {
+        binormal.set(0, 1, 0);
+      }
+      binormal.normalize();
+
+      // Taper smoothly to sleek pointed/rounded tips at both ends of the wipe
+      const tipPinch = Math.sin(u * Math.PI);
+      const taper = Math.pow(tipPinch, 0.55);
+      const w = Math.max(0.015, halfWidth * taper);
+      const bulgeDepth = 0.22 * taper;
+
+      for (let j = 0; j < crossCols; j++) {
+        const vRatio = j / (crossCols - 1); // 0..1
+        const s = vRatio * 2.0 - 1.0; // -1..1 across width
+        const arch = Math.cos(s * Math.PI * 0.5); // 1 at spine, 0 at edges
+
+        const vIdx = i * crossCols + j;
+        positions[vIdx * 3] = p.x + binormal.x * (s * w) - fwd.x * (arch * bulgeDepth);
+        positions[vIdx * 3 + 1] = p.y + binormal.y * (s * w) - fwd.y * (arch * bulgeDepth);
+        positions[vIdx * 3 + 2] = p.z + binormal.z * (s * w) - fwd.z * (arch * bulgeDepth);
+
+        // Curved lens normal fan across the cross-section for strong refraction bending
+        normalVec
+          .copy(fwd)
+          .multiplyScalar(-Math.cos(s * 0.85))
+          .addScaledVector(binormal, Math.sin(s * 0.85))
+          .normalize();
+        normals[vIdx * 3] = normalVec.x;
+        normals[vIdx * 3 + 1] = normalVec.y;
+        normals[vIdx * 3 + 2] = normalVec.z;
+
+        uvs[vIdx * 2] = u;
+        uvs[vIdx * 2 + 1] = vRatio;
+      }
+
+      if (i < segs) {
+        for (let j = 0; j < crossCols - 1; j++) {
+          const a = i * crossCols + j;
+          const b = i * crossCols + (j + 1);
+          const c = (i + 1) * crossCols + j;
+          const d = (i + 1) * crossCols + (j + 1);
+          indices.push(a, b, c, b, d, c);
+        }
+      }
+    }
+
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(indices);
+    geo.computeTangents();
+    geo.computeBoundingSphere();
+  };
+
+  rebuild(initialPoints, initialViewForward);
+
+  const update = (dt: number, elapsed: number, age: number, maxAge: number) => {
+    warpNormalMap.offset.set(elapsed * 0.28, -elapsed * 0.16);
+    sheenMat.uniforms.uTime.value = elapsed;
+    const remaining = Math.max(0, maxAge - age);
+
+    // Phase 1 (0.42s .. 0.78s remaining): hairline thin-ice cracks spread across the stationary wipe
+    if (remaining <= 0.78 && remaining > 0.42) {
+      const crackT = 1.0 - (remaining - 0.42) / 0.36;
+      sheenMat.uniforms.uCrackProgress.value = crackT;
+    } else if (remaining > 0.78) {
+      sheenMat.uniforms.uCrackProgress.value = 0.0;
+    }
+
+    // Phase 2 (final 0.42s): wipe shatters in-place into tumbling refractive glass shards!
+    if (remaining <= 0.42) {
+      if (!shatterTriggered) {
+        triggerShatter();
+      }
+      const shatterProgress = 1.0 - remaining / 0.42; // 0..1
+      const shrink = Math.max(0.01, 1.0 - Math.pow(shatterProgress, 1.35));
+      for (const s of shards) {
+        s.vel.y -= 9.5 * dt; // Gravity pull on glass shards
+        s.mesh.position.addScaledVector(s.vel, dt);
+        s.mesh.rotation.x += s.rotVel.x * dt;
+        s.mesh.rotation.y += s.rotVel.y * dt;
+        s.mesh.rotation.z += s.rotVel.z * dt;
+        s.mesh.scale.setScalar(s.baseScale * shrink);
+      }
+    }
+  };
+
+  const dispose = () => {
+    geo.dispose();
+    shardGeo.dispose();
+    warpNormalMap.dispose();
+    ribbonMat.dispose();
+    sheenMat.dispose();
+  };
+
+  return { group, rebuild, update, dispose };
+}
+
 

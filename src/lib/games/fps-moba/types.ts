@@ -20,6 +20,7 @@ export interface SecondaryFireConfig {
   kind:
     | 'BARRIER_SHIELD'
     | 'SKY_DEFLECT'
+    | 'REALITY_WIPE'
     | 'CHARGED_PUNCH'
     | 'HELIX_ROCKET'
     | 'LAPSE_BLUE_ORB'
@@ -208,6 +209,9 @@ export interface FpsHudState {
   canSummonMahoraga?: boolean;
   canCastShatteredSky?: boolean;
   isSkyHovering?: boolean;
+  isUroFlying?: boolean;
+  isRealityWiping?: boolean;
+  activeRealityWipes?: number;
   isShadowStepping?: boolean;
   shadowStepRemainingSec?: number;
   canNueCarry?: boolean;

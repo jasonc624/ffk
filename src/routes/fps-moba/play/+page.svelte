@@ -279,10 +279,10 @@
         </div>
       {/if}
 
-      <!-- Uro Takako Surface of the Sky Hover & Domain Finisher -->
-      {#if hud.isSkyHovering}
+      <!-- Uro Takako Sky Flight, Dual-Mode Thin Ice Breaker & Domain Finisher -->
+      {#if hud.isUroFlying}
         <div class="mt-6 px-3.5 py-1 rounded-full bg-cyan-500/25 border border-cyan-300 font-['Share_Tech_Mono'] text-[10px] font-bold text-cyan-100 shadow-[0_0_18px_rgba(103,232,249,0.55)]">
-          SURFACE OF THE SKY · GLIDING [HOLD SPACE]
+          SKY FLIGHT ACTIVE · [E] AERIAL 3M THIN ICE SLAM · [HOLD SPACE] GLIDE
         </div>
       {/if}
       {#if hud.canCastShatteredSky}
@@ -565,7 +565,11 @@
                     ? 'Shattered Sky'
                     : key === 'E' && hud.nueToadPreview === 'TOAD'
                       ? 'Toad Rescue'
-                      : ab.name}
+                      : key === 'E' && hud.hero.id === 'uro'
+                        ? hud.isUroFlying
+                          ? 'Thin Ice Slam (3m)'
+                          : 'Thin Ice Beam'
+                        : ab.name}
           </div>
           {#if hasCharges}
             <div class="w-full flex items-center justify-between font-['Share_Tech_Mono'] text-[9px] pt-0.5">
@@ -620,6 +624,8 @@
             <span class="text-sky-300 font-bold animate-pulse">ATTRACT [M2]</span>
           {:else if hud.secondaryCooldownMs > 0}
             <span class="text-rose-400 font-bold">{(hud.secondaryCooldownMs / 1000).toFixed(1)}s CD</span>
+          {:else if hud.hero.secondaryFire.kind === 'REALITY_WIPE'}
+            <span class="text-cyan-300 font-bold">{hud.activeRealityWipes ?? 0} / 3 ACTIVE (5s)</span>
           {:else if (hud.hero.secondaryFire.kind === 'BARRIER_SHIELD' || hud.hero.secondaryFire.kind === 'SKY_DEFLECT') && hud.barrierMaxHp > 0}
             <span class="text-white font-bold">{hud.barrierHp} / {hud.barrierMaxHp}</span>
           {:else}

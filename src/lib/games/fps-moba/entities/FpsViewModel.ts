@@ -504,24 +504,22 @@ export class FpsViewModel {
 
   private buildUroSkyHandsViewModel() {
     const skinMat = new THREE.MeshStandardMaterial({
-      color: 0xf7dcd0,
-      roughness: 0.56,
-      metalness: 0.03
+      color: 0xd8a894,
+      roughness: 0.82,
+      metalness: 0.0
     });
     const skyGlassMat = new THREE.MeshBasicMaterial({
-      color: 0x67e8f9,
+      color: 0x38bdf8,
       transparent: true,
-      opacity: 0.52,
+      opacity: 0.28,
       side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
       depthWrite: false
     });
     const skyRimMat = new THREE.MeshBasicMaterial({
-      color: 0xf0f9ff,
+      color: 0x7dd3fc,
       wireframe: true,
       transparent: true,
-      opacity: 0.65,
-      blending: THREE.AdditiveBlending,
+      opacity: 0.34,
       depthWrite: false
     });
 
@@ -558,15 +556,15 @@ export class FpsViewModel {
     thumb.rotation.set(0.55, 0.35, 0.95);
     handRoot.add(thumb);
 
-    // Translucent warped-sky cuff & floating crystalline spatial distortion prism above palm
-    const wristVeil = new THREE.Mesh(new THREE.TorusGeometry(0.062, 0.012, 8, 22), skyGlassMat);
+    // Subtle warped-sky wrist ring & small distortion prism offset cleanly to the side so the hand stays sharp
+    const wristVeil = new THREE.Mesh(new THREE.TorusGeometry(0.056, 0.008, 8, 22), skyGlassMat);
     wristVeil.position.set(0.032, -0.022, 0.04);
     wristVeil.rotation.set(Math.PI * 0.48, 0.12, 0.25);
     handRoot.add(wristVeil);
 
-    const skyOrb = new THREE.Mesh(new THREE.OctahedronGeometry(0.052, 0), skyRimMat);
-    skyOrb.position.set(-0.02, 0.085, -0.11);
-    const skyHalo = new THREE.Mesh(new THREE.TorusGeometry(0.088, 0.008, 8, 24), skyGlassMat);
+    const skyOrb = new THREE.Mesh(new THREE.OctahedronGeometry(0.034, 0), skyRimMat);
+    skyOrb.position.set(-0.075, 0.055, -0.08);
+    const skyHalo = new THREE.Mesh(new THREE.TorusGeometry(0.058, 0.006, 8, 24), skyGlassMat);
     skyHalo.rotation.x = Math.PI * 0.38;
     skyOrb.add(skyHalo);
     handRoot.add(skyOrb);
@@ -852,7 +850,7 @@ export class FpsViewModel {
       const lensMesh = new THREE.Mesh(lensGeo, this.infinityDistortionMat);
       this.barrierShieldGroup.add(lensMesh);
     } else if (this.hero.secondaryFire.kind === 'SKY_DEFLECT') {
-      // Uro Takako Sky Veil Deflect: translucent grabbed sky-cloth rippling in front of her
+      // Uro Takako Sky Deflect: translucent grabbed sky-cloth rippling along her cursor
       this.infinityDistortionMat = createSkyVeilDistortionMaterial();
       const veilGeo = new THREE.PlaneGeometry(3.2, 2.2, 32, 24);
       const veilMesh = new THREE.Mesh(veilGeo, this.infinityDistortionMat);
@@ -904,7 +902,8 @@ export class FpsViewModel {
     if (this.hero.weapon.fireMode === 'MELEE_CLEAVE') {
       this.swingProgress = 1.0;
       this.swingDir *= -1;
-      this.muzzleLight.intensity = 4.5;
+      // Keep hand-based melee swings (Uro) free of blinding point-light bloom
+      this.muzzleLight.intensity = this.hero.weapon.viewModelType === 'URO_SKY_HANDS' ? 0.5 : 4.5;
     } else if (this.hero.weapon.fireMode === 'HAND_CANNON') {
       // Left-hand knuckle blast + recoil
       this.castAnimProgress = 0.75;
@@ -937,7 +936,7 @@ export class FpsViewModel {
 
   public triggerQuickMelee() {
     this.quickMeleeProgress = 1.0;
-    this.muzzleLight.intensity = 3.5;
+    this.muzzleLight.intensity = this.hero.weapon.viewModelType === 'URO_SKY_HANDS' ? 0.5 : 3.5;
   }
 
   public triggerReload(durationSec: number) {

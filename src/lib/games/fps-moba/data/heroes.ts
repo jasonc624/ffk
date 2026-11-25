@@ -452,21 +452,19 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
       projectileColor: '#67e8f9'
     },
     secondaryFire: {
-      name: 'Sky Veil Deflect [Hold Right Click]',
-      kind: 'SKY_DEFLECT',
+      name: 'Reality Wipe [Hold & Drag M2]',
+      kind: 'REALITY_WIPE',
       description:
-        'Grab and pull the sky like a cloth in front of you, catching incoming projectiles and redirecting them right back toward your crosshair while absorbing direct hits.',
-      manaDrainPerSec: 22,
-      barrierMaxHp: 600,
-      barrierRegenPerSec: 110,
+        'Hold & drag Right Click to paint a smoky Reality Wipe across space (up to 3 active at once, each lingering in place for 5.0s). Any move entering a wipe is deflected toward your cursor!',
+      manaCost: 16,
       color: '#67e8f9'
     },
     abilities: {
       SHIFT: {
         key: 'SHIFT',
-        name: 'Sky Pull',
+        name: 'Sky Flight',
         description:
-          'Grab the surface of the sky and yank yourself along your 3D look direction with buoyant aerial hang-time. Holds 2 charges (4.2s recharge each).',
+          'Grab the sky to surge along your 3D look direction and enter Sky Flight (2.6s aerial hover; hold [SPACE] anytime airborne to keep gliding). Holds 2 charges.',
         cooldownMs: 4200,
         maxCharges: 2,
         manaCost: 14,
@@ -480,12 +478,12 @@ export const FPS_MOBA_HEROES: FpsHeroDef[] = [
         key: 'E',
         name: 'Thin Ice Breaker',
         description:
-          'Strike the surface of the sky itself to shatter space like thin ice in a 6.5m shockwave, piercing guards/shields and dealing 2× damage to Domain barriers.',
+          'Grounded: Crack reality in front of you and fire a piercing Reality-Warping Beam outwards (28m). In Flight: Dive down to the surface and crack anyone in a 3m blast radius!',
         cooldownMs: 5500,
         manaCost: 24,
         kind: 'THIN_ICE_BREAKER',
         damage: 115,
-        radius: 6.5,
+        radius: 3.0,
         durationMs: 700,
         color: '#bae6fd'
       },

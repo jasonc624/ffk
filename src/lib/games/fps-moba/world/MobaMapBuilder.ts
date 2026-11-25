@@ -30,9 +30,52 @@ export class MobaMapBuilder {
   // ─────────────────────────────────────────────────────────────
   //  MAP 1: CYBER SHIBUYA (Default Tactical Cyber Arena)
   // ─────────────────────────────────────────────────────────────
+  private applySkyEnvironmentMap(scene: THREE.Scene, isOrlando: boolean) {
+    const w = 128;
+    const h = 64;
+    const data = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      const v = 1.0 - y / (h - 1); // 1 at top (zenith), 0 at bottom (nadir)
+      for (let x = 0; x < w; x++) {
+        let r: number;
+        let g: number;
+        let b: number;
+        if (v >= 0.45) {
+          const t = Math.min(1, (v - 0.45) / 0.55);
+          if (isOrlando) {
+            r = Math.round(THREE.MathUtils.lerp(248, 38, Math.pow(t, 0.65)));
+            g = Math.round(THREE.MathUtils.lerp(225, 130, Math.pow(t, 0.65)));
+            b = Math.round(THREE.MathUtils.lerp(195, 242, Math.pow(t, 0.65)));
+          } else {
+            r = Math.round(THREE.MathUtils.lerp(110, 34, Math.pow(t, 0.6)));
+            g = Math.round(THREE.MathUtils.lerp(168, 72, Math.pow(t, 0.6)));
+            b = Math.round(THREE.MathUtils.lerp(235, 148, Math.pow(t, 0.6)));
+          }
+        } else {
+          const t = v / 0.45;
+          r = Math.round(THREE.MathUtils.lerp(45, 95, t));
+          g = Math.round(THREE.MathUtils.lerp(58, 122, t));
+          b = Math.round(THREE.MathUtils.lerp(82, 165, t));
+        }
+        const idx = (y * w + x) * 4;
+        data[idx] = r;
+        data[idx + 1] = g;
+        data[idx + 2] = b;
+        data[idx + 3] = 255;
+      }
+    }
+    const envTex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+    envTex.mapping = THREE.EquirectangularReflectionMapping;
+    envTex.colorSpace = THREE.SRGBColorSpace;
+    envTex.needsUpdate = true;
+    scene.environment = envTex;
+  }
+
   private buildArenaMap(scene: THREE.Scene) {
     // 1. High-visibility Lighting & Atmospheric Fog
+    scene.background = new THREE.Color(0x3a629c);
     scene.fog = new THREE.FogExp2(0x283c66, 0.0028);
+    this.applySkyEnvironmentMap(scene, false);
 
     const hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0x475569, 2.6);
     hemiLight.position.set(0, 80, 0);
@@ -155,7 +198,9 @@ export class MobaMapBuilder {
   // ─────────────────────────────────────────────────────────────
   private buildOrlandoMap(scene: THREE.Scene) {
     // 1. Warm Tropical Sunshine & Atmospheric Florida Haze
+    scene.background = new THREE.Color(0x5694e8);
     scene.fog = new THREE.FogExp2(0xe0f2fe, 0.0022);
+    this.applySkyEnvironmentMap(scene, true);
 
     const hemiLight = new THREE.HemisphereLight(0xfef08a, 0x0284c7, 2.8);
     hemiLight.position.set(0, 80, 0);

@@ -4,7 +4,14 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { FpsHeroDef, MobaTeam } from '../types';
 
-export type HeroAnimHint = 'idle' | 'dance' | 'walk' | 'run';
+export type HeroAnimHint =
+  | 'idle'
+  | 'dance'
+  | 'walk'
+  | 'run'
+  | 'reality_wipe'
+  | 'thin_ice_breaker'
+  | 'domain_expansion';
 
 export interface ProceduralHeroBuildResult {
   group: THREE.Group;
@@ -23,11 +30,27 @@ interface RiggedBoneRecord {
   bindWorldQuat: THREE.Quaternion;
 }
 
+type BasicLocomotionHint = 'idle' | 'dance' | 'walk' | 'run';
+
 interface BiomasterAnimController {
   root: THREE.Group;
   mixer: THREE.AnimationMixer;
-  actions: Record<HeroAnimHint, THREE.AnimationAction>;
-  activeKey: HeroAnimHint | null;
+  actions: Record<BasicLocomotionHint, THREE.AnimationAction>;
+  activeKey: BasicLocomotionHint | null;
+  lastElapsed: number;
+}
+
+interface UroAnimController {
+  root: THREE.Group;
+  mixer: THREE.AnimationMixer;
+  idleAction: THREE.AnimationAction;
+  moveAction: THREE.AnimationAction;
+  realityWipeAction: THREE.AnimationAction | null;
+  thinIceAction: THREE.AnimationAction | null;
+  domainAction: THREE.AnimationAction | null;
+  activeKey: string;
+  warpNormalTex: THREE.DataTexture;
+  smokeTimeUniform: { value: number };
   lastElapsed: number;
 }
 
@@ -50,10 +73,12 @@ interface RiggedGojoHandle {
   isTposeBind?: boolean;
   biomasterAnim?: BiomasterAnimController;
   dualClipAnim?: DualClipAnimController;
+  uroAnim?: UroAnimController;
 }
 
 let cachedToonGradient: THREE.DataTexture | null = null;
 let cachedWoodTexture: THREE.CanvasTexture | null = null;
+let cachedSkyWarpNormalTex: THREE.DataTexture | null = null;
 
 const _tmpCharEuler = new THREE.Euler();
 const _tmpCharQuat = new THREE.Quaternion();
@@ -667,7 +692,7 @@ async function loadBiomasterAnimController(
       return action;
     };
 
-    const actions: Record<HeroAnimHint, THREE.AnimationAction> = {
+    const actions: Record<BasicLocomotionHint, THREE.AnimationAction> = {
       idle: makeAction(idleClip),
       dance: makeAction(danceClip),
       walk: makeAction(walkClip),
@@ -721,6 +746,325 @@ async function loadRiggedBiomasterGlb(unitUserData?: unknown): Promise<RiggedGoj
 
     return handle;
   } catch {
+    return null;
+  }
+}
+
+/** Smooth tiling tangent-space wave normal map that bends refracted background rays through Uro's sky bikini. */
+function getSkyWarpNormalTexture(): THREE.DataTexture {
+  if (cachedSkyWarpNormalTex) return cachedSkyWarpNormalTex;
+  const size = 64;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    const v = (y / size) * Math.PI * 2;
+    for (let x = 0; x < size; x++) {
+      const u = (x / size) * Math.PI * 2;
+      const nx = Math.sin(u * 2.0 + Math.cos(v * 2.0) * 0.8) * 0.45 + Math.cos(u * 3.0 - v * 2.0) * 0.25;
+      const ny = Math.cos(v * 2.0 + Math.sin(u * 2.0) * 0.8) * 0.45 + Math.sin(v * 3.0 + u * 2.0) * 0.25;
+      const nz = Math.sqrt(Math.max(0.15, 1.0 - nx * nx - ny * ny));
+      const idx = (y * size + x) * 4;
+      data[idx] = Math.round((nx * 0.5 + 0.5) * 255);
+      data[idx + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+      data[idx + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+      data[idx + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  cachedSkyWarpNormalTex = tex;
+  return tex;
+}
+
+/**
+ * Creates Uro's smoky, cloud-like reality-warping cover over her chest and hip regions:
+ * 1. Cuts an organic, noise-feathered see-through window out of her opaque body mesh.
+ * 2. Binds a hazy transmissive lens layer (`transmission: 1.0`, smoky slate-sky tint) so you see
+ *    through her body with a soft warped view of the background.
+ * 3. Binds an outer billowing smoky sky-vapor shroud (`SkinnedMesh` with animated 3D fbm wisps &
+ *    soft feathered edges) so it reads as living warped-space smoke/mist rather than clothing.
+ */
+function applyUroRealityWarpBikini(
+  uroRoot: THREE.Group,
+  warpNormalTex: THREE.DataTexture,
+  _smokeTimeUniform: { value: number }
+): void {
+  const allowedTorsoBones = new Set([
+    'Hips',
+    'Spine02',
+    'Spine01',
+    'Spine',
+    'LeftUpLeg',
+    'RightUpLeg',
+    'LeftLeg',
+    'RightLeg',
+    'LeftShoulder',
+    'RightShoulder'
+  ]);
+
+  const skinnedMeshes: THREE.SkinnedMesh[] = [];
+  uroRoot.traverse((obj) => {
+    if ((obj as THREE.SkinnedMesh).isSkinnedMesh) {
+      skinnedMeshes.push(obj as THREE.SkinnedMesh);
+    }
+  });
+
+  for (const sm of skinnedMeshes) {
+    const geo = sm.geometry;
+    const pos = geo.attributes.position as THREE.BufferAttribute | undefined;
+    const norm = geo.attributes.normal as THREE.BufferAttribute | undefined;
+    const skinIdx = geo.attributes.skinIndex as THREE.BufferAttribute | undefined;
+    const skinW = geo.attributes.skinWeight as THREE.BufferAttribute | undefined;
+    const indexAttr = geo.index;
+    const skeleton = sm.skeleton;
+
+    if (!pos || !skinIdx || !skinW || !indexAttr || !skeleton) continue;
+
+    // Render FrontSide on opaque body so inner backfaces never block the see-through core
+    const mats = Array.isArray(sm.material) ? sm.material : [sm.material];
+    for (const m of mats) {
+      if (m) m.side = THREE.FrontSide;
+    }
+
+    const vertCount = pos.count;
+    // coreZone: 1 = chest see-through warp band, 2 = lower skirt-style hip/upper-thigh see-through warp band
+    const coreZone = new Uint8Array(vertCount);
+
+    for (let i = 0; i < vertCount; i++) {
+      let torsoWeight = 0;
+      for (let k = 0; k < 4; k++) {
+        const bIdx = skinIdx.getComponent(i, k);
+        const w = skinW.getComponent(i, k);
+        const bName = skeleton.bones[bIdx]?.name ?? '';
+        if (allowedTorsoBones.has(bName)) torsoWeight += w;
+      }
+      if (torsoWeight < 0.62) continue;
+
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      if (Math.abs(x) > 0.185) continue;
+
+      // Subtle organic boundary wave so the spatial warp edge feels natural
+      const wisp =
+        Math.sin(x * 29.0 + z * 23.0) * 0.012 + Math.cos(x * 43.0 - y * 31.0) * 0.008;
+
+      // 1. Chest reality-warping band around Spine01 (y = 0.875 .. 0.965)
+      const chestTopCore = (z >= 0.085 ? 0.964 + 0.14 * Math.min(1, Math.abs(x) / 0.07) : 0.95) + wisp;
+      const chestBotCore = (z >= 0.085 ? 0.876 : 0.892) - wisp * 0.7;
+      if (y >= chestBotCore && y <= chestTopCore && Math.abs(x) <= 0.162) {
+        coreZone[i] = 1;
+        continue;
+      }
+
+      // 2. Lower skirt-like hip & upper-thigh reality-warping cover (y = 0.505 .. 0.730)
+      // Covers across the hips, pelvis, and upper thighs like a wrap skirt instead of a high-cut bikini
+      const skirtBottomCore = 0.505 + 0.14 * Math.max(0, Math.abs(x) - 0.06) - wisp * 0.7;
+      const skirtTopCore = 0.728 + 0.04 * Math.abs(x) + wisp;
+      if (y >= skirtBottomCore && y <= skirtTopCore && Math.abs(x) <= 0.18) {
+        coreZone[i] = 2;
+      }
+    }
+
+    const srcIndices = indexAttr.array;
+    const bodyIndices: number[] = [];
+    const coreIndices: number[] = [];
+
+    for (let t = 0; t < srcIndices.length; t += 3) {
+      const a = srcIndices[t];
+      const b = srcIndices[t + 1];
+      const c = srcIndices[t + 2];
+
+      const ca = coreZone[a];
+      const cb = coreZone[b];
+      const cc = coreZone[c];
+      if ((ca === 1 && cb === 1 && cc === 1) || (ca === 2 && cb === 2 && cc === 2)) {
+        coreIndices.push(a, b, c);
+      } else {
+        bodyIndices.push(a, b, c);
+      }
+    }
+
+    if (coreIndices.length === 0) continue;
+
+    // 1. Cut core triangles out of Uro's opaque body so the scene behind her renders straight through
+    const IndexArrayCtor = vertCount > 65535 ? Uint32Array : Uint16Array;
+    const bodyGeo = geo.clone();
+    bodyGeo.setIndex(new THREE.BufferAttribute(new IndexArrayCtor(bodyIndices), 1));
+    sm.geometry = bodyGeo;
+
+    const buildExtractedSkinnedGeo = (
+      triIndices: number[],
+      normalInflate: number
+    ): THREE.BufferGeometry => {
+      const remap = new Int32Array(vertCount).fill(-1);
+      const bPos: number[] = [];
+      const bNorm: number[] = [];
+      const bUv: number[] = [];
+      const bSkinI: number[] = [];
+      const bSkinW: number[] = [];
+      const remapped: number[] = [];
+
+      for (let idx = 0; idx < triIndices.length; idx++) {
+        const oldV = triIndices[idx];
+        let newV = remap[oldV];
+        if (newV === -1) {
+          newV = bPos.length / 3;
+          remap[oldV] = newV;
+          const nx = norm ? norm.getX(oldV) : 0;
+          const ny = norm ? norm.getY(oldV) : 0;
+          const nz = norm ? norm.getZ(oldV) : 1;
+          const ox = pos.getX(oldV);
+          const oy = pos.getY(oldV);
+          const oz = pos.getZ(oldV);
+          const px = ox + nx * normalInflate;
+          const py = oy + ny * normalInflate;
+          const pz = oz + nz * normalInflate;
+          bPos.push(px, py, pz);
+          bNorm.push(nx, ny, nz);
+          bUv.push(px * 4.2 + 0.5, py * 4.2);
+          bSkinI.push(
+            skinIdx.getX(oldV),
+            skinIdx.getY(oldV),
+            skinIdx.getZ(oldV),
+            skinIdx.getW(oldV)
+          );
+          bSkinW.push(
+            skinW.getX(oldV),
+            skinW.getY(oldV),
+            skinW.getZ(oldV),
+            skinW.getW(oldV)
+          );
+        }
+        remapped.push(newV);
+      }
+
+      const outGeo = new THREE.BufferGeometry();
+      outGeo.setAttribute('position', new THREE.Float32BufferAttribute(bPos, 3));
+      outGeo.setAttribute('normal', new THREE.Float32BufferAttribute(bNorm, 3));
+      outGeo.setAttribute('uv', new THREE.Float32BufferAttribute(bUv, 2));
+      outGeo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(bSkinI, 4));
+      outGeo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(bSkinW, 4));
+      outGeo.setIndex(remapped);
+      outGeo.computeTangents();
+      return outGeo;
+    };
+
+    // 2. Pure view-dependent reality-warping lens: crystal-clear refraction of what's behind her based on viewer angle
+    const coreGeo = buildExtractedSkinnedGeo(coreIndices, 0.008);
+    const warpCoreMat = new THREE.MeshPhysicalMaterial({
+      color: new THREE.Color(0xffffff),
+      transmission: 1.0,
+      ior: 1.38,
+      thickness: 1.15,
+      roughness: 0.02,
+      metalness: 0.0,
+      reflectivity: 0.12,
+      envMapIntensity: 0.18,
+      attenuationColor: new THREE.Color(0xffffff),
+      attenuationDistance: 100.0,
+      normalMap: warpNormalTex,
+      normalScale: new THREE.Vector2(0.58, 0.58),
+      transparent: false,
+      side: THREE.FrontSide
+    });
+    const coreMesh = new THREE.SkinnedMesh(coreGeo, warpCoreMat);
+    coreMesh.name = 'uro_reality_warp_core';
+    coreMesh.frustumCulled = false;
+    coreMesh.bind(skeleton, sm.bindMatrix);
+
+    const parentObj = sm.parent ?? uroRoot;
+    parentObj.add(coreMesh);
+  }
+}
+
+/** Loads `/models/uro_takaka.glb`, applies the see-through reality-warping bikini, and binds all 5 animations. */
+async function loadRiggedUroGlb(unitUserData?: unknown): Promise<RiggedGojoHandle | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const gltf = await loadCachedGlb('/models/uro_takaka.glb');
+    const toonGrad = getAnimeToonGradient();
+    const root = new THREE.Group();
+
+    const animRoot = cloneSkeleton(gltf.scene) as THREE.Group;
+    animRoot.scale.setScalar(2.22 / 1.7);
+    applyAnimeToonToScene(animRoot, toonGrad);
+
+    // Instance-specific clone of the scrolling wave normal map & smoke time uniform
+    const warpNormalTex = getSkyWarpNormalTexture().clone();
+    warpNormalTex.needsUpdate = true;
+    const smokeTimeUniform = { value: 0 };
+    applyUroRealityWarpBikini(animRoot, warpNormalTex, smokeTimeUniform);
+
+    const mixer = new THREE.AnimationMixer(animRoot);
+    const findClip = (substr: string) =>
+      gltf.animations.find((c) => c.name.toLowerCase().includes(substr.toLowerCase())) ?? null;
+
+    const idleClip = findClip('Idle_7_original') ?? gltf.animations[0];
+    const baseIdleClip = findClip('baselayer') ?? idleClip;
+    const realityWipeClip = findClip('RealityWipe');
+    const thinIceClip = findClip('ThinIceBreaker');
+    const domainClip = findClip('DomainExpansion');
+
+    if (!idleClip) return null;
+
+    const idleAction = mixer.clipAction(idleClip);
+    idleAction.setLoop(THREE.LoopRepeat, Infinity);
+    idleAction.play();
+
+    const moveAction = mixer.clipAction(baseIdleClip ?? idleClip);
+    moveAction.setLoop(THREE.LoopRepeat, Infinity);
+
+    const makeAbilityAction = (clip: THREE.AnimationClip | null) => {
+      if (!clip) return null;
+      const act = mixer.clipAction(clip);
+      act.setLoop(THREE.LoopOnce, 1);
+      act.clampWhenFinished = true;
+      return act;
+    };
+
+    const realityWipeAction = makeAbilityAction(realityWipeClip);
+    const thinIceAction = makeAbilityAction(thinIceClip);
+    const domainAction = makeAbilityAction(domainClip);
+
+    // Low-poly invisible hit capsules so raycasting never touches 209k skinned triangles
+    const hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
+    const bodyHit = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.36, 1.55, 8), hitboxMat);
+    bodyHit.position.y = 0.9;
+    const headHit = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 8), hitboxMat);
+    headHit.position.y = 1.96;
+    headHit.userData.isHead = true;
+    if (unitUserData !== undefined) {
+      bodyHit.userData.unit = unitUserData;
+      headHit.userData.unit = unitUserData;
+    }
+
+    root.add(animRoot, bodyHit, headHit);
+
+    return {
+      root,
+      hitMeshes: [bodyHit, headHit],
+      bones: new Map(),
+      mixer: null,
+      uroAnim: {
+        root: animRoot,
+        mixer,
+        idleAction,
+        moveAction,
+        realityWipeAction,
+        thinIceAction,
+        domainAction,
+        activeKey: 'idle',
+        warpNormalTex,
+        smokeTimeUniform,
+        lastElapsed: -1
+      }
+    };
+  } catch (err) {
+    console.warn('Failed to load uro_takaka.glb:', err);
     return null;
   }
 }
@@ -1906,8 +2250,22 @@ export function buildProceduralHeroModel(
     rightArm.pivot.add(sword);
     hitMeshes.push(sword);
   } else if (hero.id === 'uro') {
-    // Takako Uro: flowing pale silver-white bob hair with sweeping bangs, dark sclera + golden irises,
-    // and luminous warped-sky silk ribbons wrapping around her body & wrists
+    // Load rigged /models/uro_takaka.glb with reality-warping see-through bikini & 5 animation clips
+    void loadRiggedUroGlb().then((rig) => {
+      if (!rig) return;
+      if (bodyMesh.userData.unit) {
+        for (const m of rig.hitMeshes) {
+          m.userData.unit = bodyMesh.userData.unit;
+        }
+      }
+
+      hipsGroup.visible = false;
+      hitMeshes.splice(0, hitMeshes.length, ...rig.hitMeshes);
+      group.add(rig.root);
+      riggedGojo = rig;
+    });
+
+    // Immediate stylized fallback until async GLB finishes loading
     const uroHairMat = createToonMaterial(0xf1f5f9, 0xbae6fd, 0.18);
     const hairCrown = new THREE.Mesh(
       new THREE.SphereGeometry(0.215, 22, 16, 0, Math.PI * 2, 0, Math.PI * 0.62),
@@ -2041,6 +2399,70 @@ export function buildProceduralHeroModel(
   const animate = (elapsed: number, isMoving: boolean, isStunned: boolean, animHint?: HeroAnimHint) => {
     const t = elapsed + phaseOffset;
 
+    if (riggedGojo?.uroAnim) {
+      const uAnim = riggedGojo.uroAnim;
+      const dt = uAnim.lastElapsed < 0 ? 0.016 : Math.max(0, Math.min(0.1, elapsed - uAnim.lastElapsed));
+      uAnim.lastElapsed = elapsed;
+
+      // Continuously scroll the wave normal map & smoky vapor shroud so the see-through bikini warps space smoothly
+      uAnim.warpNormalTex.offset.set(elapsed * 0.16, -elapsed * 0.12);
+      uAnim.smokeTimeUniform.value = elapsed;
+
+      const getActionByKey = (key: string): THREE.AnimationAction => {
+        if (key === 'reality_wipe' && uAnim.realityWipeAction) return uAnim.realityWipeAction;
+        if (key === 'thin_ice_breaker' && uAnim.thinIceAction) return uAnim.thinIceAction;
+        if (key === 'domain_expansion' && uAnim.domainAction) return uAnim.domainAction;
+        if (key === 'move') return uAnim.moveAction;
+        return uAnim.idleAction;
+      };
+
+      let desiredKey = 'idle';
+      if (!isStunned) {
+        if (animHint === 'reality_wipe' && uAnim.realityWipeAction) {
+          desiredKey = 'reality_wipe';
+        } else if (animHint === 'thin_ice_breaker' && uAnim.thinIceAction) {
+          desiredKey = 'thin_ice_breaker';
+        } else if (animHint === 'domain_expansion' && uAnim.domainAction) {
+          desiredKey = 'domain_expansion';
+        } else if (animHint === 'run' || animHint === 'walk' || (!animHint && isMoving)) {
+          desiredKey = 'move';
+        }
+      }
+
+      if (desiredKey !== uAnim.activeKey) {
+        const prevAction = getActionByKey(uAnim.activeKey);
+        const nextAction = getActionByKey(desiredKey);
+        nextAction.enabled = true;
+        nextAction.reset();
+        nextAction.setEffectiveWeight(1.0);
+        nextAction.setEffectiveTimeScale(
+          desiredKey === 'move'
+            ? animHint === 'walk'
+              ? 1.0
+              : 1.35
+            : desiredKey === 'thin_ice_breaker'
+              ? 1.25
+              : 1.0
+        );
+        nextAction.play();
+        if (prevAction && prevAction !== nextAction) {
+          prevAction.enabled = true;
+          nextAction.crossFadeFrom(prevAction, 0.2, false);
+        }
+        uAnim.activeKey = desiredKey;
+      }
+
+      // Subtle weightless sky-levitation bob + graceful forward glide tilt while moving
+      const targetLean = desiredKey === 'move' && !isStunned ? 0.18 : 0.0;
+      uAnim.root.rotation.x = THREE.MathUtils.lerp(uAnim.root.rotation.x, targetLean, Math.min(1, dt * 8));
+      uAnim.root.position.y = isStunned ? 0 : 0.05 + Math.sin(t * 2.4) * 0.045;
+
+      if (!isStunned) {
+        uAnim.mixer.update(dt);
+      }
+      return;
+    }
+
     if (riggedGojo?.dualClipAnim) {
       const dual = riggedGojo.dualClipAnim;
       const dt = dual.lastElapsed < 0 ? 0.016 : Math.max(0, Math.min(0.1, elapsed - dual.lastElapsed));
@@ -2087,8 +2509,12 @@ export function buildProceduralHeroModel(
       }
 
       if (showAnimRig) {
-        const desiredKey: HeroAnimHint =
-          animHint ??
+        const rawHint =
+          animHint === 'idle' || animHint === 'dance' || animHint === 'walk' || animHint === 'run'
+            ? animHint
+            : undefined;
+        const desiredKey: BasicLocomotionHint =
+          rawHint ??
           (isMoving
             ? (elapsed % 9.0) < 4.5
               ? 'walk'
