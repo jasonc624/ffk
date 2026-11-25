@@ -286,6 +286,13 @@ export class FpsMobaEngine {
   private rabbitHoldElapsedSec = 0;
   private rabbitHoldSpawnAccSec = 0;
   private activeNueCarry: NueCarryShikigami | null = null;
+  private npcMegumiShowcase: {
+    mode: 'RABBIT_CLIMB' | 'NUE_CARRY' | 'SHADOW_STEP' | 'DOMAIN_MAHORAGA';
+    timer: number;
+    spawnAcc: number;
+    dir: THREE.Vector3;
+  } | null = null;
+  private npcMegumiPuddleMesh: THREE.Mesh | null = null;
 
   // Input state
   private keys: Set<string> = new Set();
@@ -613,7 +620,7 @@ export class FpsMobaEngine {
       { id: 'jogo', x: -9.5, z: 33.0, yaw: 0.2, delay: 2.3 },
       { id: 'gojo', x: -2.5, z: 44.0, yaw: 0.05, delay: 2.6 },
       { id: 'uro', x: 3.5, z: 36.0, yaw: -0.08, delay: 2.0 },
-      { id: 'megumi', x: 10.0, z: 33.0, yaw: -0.2, delay: 3.1 },
+      { id: 'megumi', x: 10.0, z: 33.0, yaw: -0.2, delay: 1.2 },
       { id: 'mr_biomaster', x: 16.5, z: 40.0, yaw: -0.35, delay: 3.8 }
     ];
 
@@ -1538,57 +1545,6 @@ export class FpsMobaEngine {
     };
   }
 
-  private summonDivineDogs() {
-    const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
-    const spawnCount = inShadowGarden ? 3 : 1;
-    const maxDogs = inShadowGarden ? 4 : 1;
-
-    const existingDogs = this.units.filter(
-      (u): u is DivineDogShikigami =>
-        u.alive && u instanceof DivineDogShikigami && u.team === 'blue'
-    );
-    let excess = existingDogs.length + spawnCount - maxDogs;
-    const shikiCtx = this.getShikigamiContext();
-    for (let i = 0; i < existingDogs.length && excess > 0; i++) {
-      const old = existingDogs[i];
-      old.onDespawn(shikiCtx);
-      const idx = this.units.indexOf(old);
-      if (idx !== -1) this.units.splice(idx, 1);
-      excess--;
-    }
-
-    const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
-    const rightVec = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-
-    for (let i = 0; i < spawnCount; i++) {
-      const side = spawnCount === 1 ? 0 : (i - (spawnCount - 1) * 0.5) * 1.6;
-      const spawnPos = this.playerPos
-        .clone()
-        .addScaledVector(flatForward, 2.4)
-        .addScaledVector(rightVec, side);
-      const resolved = this.mapBuilder.resolveHorizontalCollision(spawnPos.x, spawnPos.z, 0.7, this.playerPos.y);
-      spawnPos.set(
-        resolved.x,
-        this.mapBuilder.getFloorHeight(resolved.x, resolved.z, this.playerPos.y),
-        resolved.z
-      );
-
-      const dog = new DivineDogShikigami({
-        variant: 'BLACK',
-        spawnPos,
-        team: 'blue',
-        summonerId: 'player',
-        phaseShift: i * 1.4,
-        createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
-      });
-      this.scene.add(dog.group);
-      this.units.push(dog);
-
-      this.spawnImpactRing(spawnPos.clone().add(new THREE.Vector3(0, 0.15, 0)), '#6366f1', 2.0);
-      this.spawnCursedBurst(spawnPos.clone().add(new THREE.Vector3(0, 0.5, 0)), 'SHADOW', 1.1, 24);
-    }
-  }
-
   private spawnRabbitEscapeBatch(spawnCount: number) {
     const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
     const maxRabbits = inShadowGarden ? 28 : 18;
@@ -1695,7 +1651,7 @@ export class FpsMobaEngine {
     }
 
     const nue = new NueCarryShikigami({
-      spawnPos: this.playerPos.clone().add(new THREE.Vector3(0, 2.45, 0)),
+      spawnPos: this.playerPos.clone().add(new THREE.Vector3(0, 2.75, 0)),
       team: 'blue',
       summonerId: 'player',
       getYaw: () => this.yaw,
@@ -2251,17 +2207,6 @@ export class FpsMobaEngine {
       return;
     }
 
-    if (sec.kind === 'DIVINE_DOGS') {
-      if (this.secondaryCooldownMs > 0 || !this.canSpendCursedEnergy()) return;
-      this.exitShadowStep();
-      this.consumeCursedEnergy(sec.manaCost ?? 22);
-      const inShadowGarden = Boolean(this.activeDomain?.isMegumiDomain);
-      this.secondaryCooldownMs = inShadowGarden ? 2600 : (sec.cooldownMs ?? 7000);
-      this.viewModel.triggerCastGesture();
-      this.summonDivineDogs();
-      return;
-    }
-
     if (sec.kind === 'RABBIT_ESCAPE') {
       this.beginHoldingRabbitEscape();
       return;
@@ -2513,71 +2458,6 @@ export class FpsMobaEngine {
     const wep = this.hero.weapon;
     if (this.shadowStepTimer > 0) {
       this.exitShadowStep();
-    }
-
-    // 0. HYBRID SHADOW (Megumi): Broadsword cleave if enemy within 4.5m in front, else Shadow Kunai throw
-    if (wep.fireMode === 'HYBRID_SHADOW') {
-      const flatForward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
-      const minCos = Math.cos(THREE.MathUtils.degToRad((wep.cleaveArcDeg ?? 115) * 0.5));
-      let closeEnemy = false;
-      for (const u of this.units) {
-        if (!u.alive || !this.canUnitTakeDamageFrom(u, 'player', 'blue')) continue;
-        const toU = u.group.position.clone().sub(this.playerPos);
-        toU.y = 0;
-        const d = toU.length();
-        if (d <= 4.5 + u.radius && (d < 1.8 || toU.normalize().dot(flatForward) >= minCos)) {
-          closeEnemy = true;
-          break;
-        }
-      }
-
-      if (closeEnemy) {
-        // Melee cleave does not require or consume Cursed Energy
-        const rateMult = this.activeDomain ? 0.72 : 1.0;
-        this.fireCooldownMs = Math.round(440 * rateMult);
-        this.viewModel.triggerMeleeSlash();
-        const slashDmg = Math.round((wep.maxDamage ?? 54) + (this.level - 1) * 3.5);
-        this.performMeleeCleave(
-          slashDmg,
-          4.6,
-          wep.cleaveArcDeg ?? 115,
-          wep.knockback ?? 4.5,
-          'Cursed Broadsword'
-        );
-        return;
-      }
-
-      // Ranged mode: Shadow-Infused Kunai (requires Cursed Energy)
-      if (!this.canSpendCursedEnergy()) return;
-      if (this.ammo <= 0 && !this.activeDomain) {
-        this.startReload();
-        return;
-      }
-      this.consumeCursedEnergy(wep.manaCost ?? 6);
-      if (!this.activeDomain) {
-        this.ammo--;
-        if (this.ammo <= 0) {
-          setTimeout(() => this.startReload(), 120);
-        }
-      }
-      const rateMult = this.activeDomain ? 0.68 : 1.0;
-      this.fireCooldownMs = Math.round(wep.fireRateMs * rateMult);
-      this.viewModel.triggerFireRecoil();
-
-      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-      const muzzleWorld = new THREE.Vector3(0.24, -0.18, -0.72).applyMatrix4(this.camera.matrixWorld);
-      const kunaiDmg = Math.round(wep.damage + (this.level - 1) * 2.5);
-      const kunai = new ShadowKunaiProjectile({
-        startPos: muzzleWorld.clone().addScaledVector(forward, 0.25),
-        forward,
-        damage: kunaiDmg,
-        team: 'blue',
-        casterId: 'player',
-        casterName: this.hero.name
-      });
-      this.scene.add(kunai.mesh);
-      this.projectiles.push(kunai);
-      return;
     }
 
     // 1. MELEE CLEAVE HEROES (Megumi Broadsword / Higuruma Gavel / Executioner's Sword)
@@ -5371,6 +5251,7 @@ export class FpsMobaEngine {
 
       if (!u.alive) {
         if (u.npcAi) this.resetNpcAiOnDeath(u);
+        if (u.heroDef?.id === 'megumi') this.resetNpcMegumiShowcase(u);
         if (u.type === 'HERO' && u.respawnTimer !== undefined) {
           u.respawnTimer -= dt;
           if (u.respawnTimer <= 0 && u.spawnPos) {
@@ -5497,6 +5378,11 @@ export class FpsMobaEngine {
         // AI-driven combatant (Gojo): full move kit, CE pool, cooldowns, domain & purple
         if (u.npcAi) {
           this.updateNpcGojoAi(u, dt, elapsed);
+          continue;
+        }
+
+        if (u.heroDef?.id === 'megumi' && this.updateNpcMegumiShowcase(u, dt, elapsed)) {
+          this.updateNpcHeroAbilities(u, dt, elapsed);
           continue;
         }
 
@@ -5857,6 +5743,227 @@ export class FpsMobaEngine {
     this.endNpcDomain(u.id);
   }
 
+  private resetNpcMegumiShowcase(u: MobaUnit) {
+    this.npcMegumiShowcase = null;
+    if (this.npcMegumiPuddleMesh) {
+      this.npcMegumiPuddleMesh.visible = false;
+    }
+    u.group.scale.set(1, 1, 1);
+    u.pullActiveTimer = 0;
+    const shikiCtx = this.getShikigamiContext();
+    for (let i = this.units.length - 1; i >= 0; i--) {
+      const carry = this.units[i];
+      if (carry instanceof NueCarryShikigami && carry.summonerId === u.id) {
+        carry.onDespawn(shikiCtx);
+        this.units.splice(i, 1);
+      }
+    }
+    this.endNpcDomain(u.id);
+  }
+
+  private spawnNpcMegumiRabbitBatch(u: MobaUnit, spawnCount: number) {
+    const maxNpcRabbits = 12;
+    const existingRabbits = this.units.filter(
+      (r): r is RabbitEscapeShikigami =>
+        r.alive && r instanceof RabbitEscapeShikigami && r.summonerId === u.id
+    );
+    let excess = existingRabbits.length + spawnCount - maxNpcRabbits;
+    const shikiCtx = this.getShikigamiContext();
+    for (let i = 0; i < existingRabbits.length && excess > 0; i++) {
+      const old = existingRabbits[i];
+      old.onDespawn(shikiCtx);
+      const idx = this.units.indexOf(old);
+      if (idx !== -1) this.units.splice(idx, 1);
+      excess--;
+    }
+
+    for (let i = 0; i < spawnCount; i++) {
+      const angle = (i / Math.max(1, spawnCount)) * Math.PI * 2 + Math.random() * 0.9;
+      const dist = 1.0 + Math.random() * 1.9;
+      const rx = u.group.position.x + Math.cos(angle) * dist;
+      const rz = u.group.position.z + Math.sin(angle) * dist;
+      const res = this.mapBuilder.resolveHorizontalCollision(rx, rz, 0.42, 0);
+      const groundY = this.mapBuilder.getFloorHeight(res.x, res.z, 0);
+      const rabbit = new RabbitEscapeShikigami({
+        spawnPos: new THREE.Vector3(res.x, groundY, res.z),
+        team: u.team,
+        summonerId: u.id,
+        hopPhase: Math.random() * Math.PI * 2,
+        scatterAngle: angle,
+        createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+      });
+      this.scene.add(rabbit.group);
+      this.units.push(rabbit);
+    }
+  }
+
+  private updateNpcMegumiShowcase(u: MobaUnit, dt: number, elapsed: number): boolean {
+    const st = this.npcMegumiShowcase;
+    if (!st) return false;
+
+    st.timer -= dt;
+
+    // 1. [Hold M2] Rabbit Escape: same climb & 0.14s wave spawn logic as the playable Megumi character
+    if (st.mode === 'RABBIT_CLIMB') {
+      const maxHoldSec = 1.45;
+      const holdElapsed = Math.max(0, maxHoldSec - st.timer);
+      const climbProgress = Math.min(1, holdElapsed / maxHoldSec);
+      const climbVelY = THREE.MathUtils.lerp(15.5, 22.5, climbProgress);
+
+      u.pullActiveTimer = 0.15;
+      u.group.position.y = Math.min(14.5, u.group.position.y + climbVelY * 0.45 * dt);
+      const res = this.mapBuilder.resolveHorizontalCollision(
+        u.group.position.x + st.dir.x * 3.5 * dt,
+        u.group.position.z + st.dir.z * 3.5 * dt,
+        u.radius,
+        u.group.position.y
+      );
+      u.group.position.x = res.x;
+      u.group.position.z = res.z;
+      this.clampUnitToDomainBarrier(u);
+      this.rotateUnitToward(u, st.dir.x, st.dir.z, dt);
+      u.animateRig?.(elapsed, true, false, 'run');
+
+      st.spawnAcc += dt;
+      const spawnInterval = 0.14;
+      if (st.spawnAcc >= spawnInterval) {
+        st.spawnAcc -= spawnInterval;
+        const inShadowGarden = this.activeDomains.some((d) => d.casterId === u.id && d.isMegumiDomain);
+        this.spawnNpcMegumiRabbitBatch(u, inShadowGarden ? 3 : 2);
+        this.spawnCursedBurst(
+          u.group.position.clone().add(new THREE.Vector3(0, 0.3, 0)),
+          'SHADOW',
+          1.4,
+          18
+        );
+      }
+
+      if (st.timer <= 0) {
+        // Transition midair into [Hold SPACE] Nue Carry Flight (2.0s duration, exact same as player startNueCarry)
+        st.mode = 'NUE_CARRY';
+        st.timer = 2.0;
+        const nueCarry = new NueCarryShikigami({
+          spawnPos: u.group.position.clone().add(new THREE.Vector3(0, 2.75, 0)),
+          team: u.team,
+          summonerId: u.id,
+          getCarrierPos: () => u.group.position,
+          getYaw: () => u.group.rotation.y + Math.PI,
+          lifetimeSec: 2.0,
+          createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+        });
+        this.scene.add(nueCarry.group);
+        this.units.push(nueCarry);
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 1.8, 0)), '#38bdf8', 3.4);
+        this.spawnCursedBurst(u.group.position.clone().add(new THREE.Vector3(0, 2.0, 0)), 'BLUE', 1.5, 32);
+      }
+      return true;
+    }
+
+    // 2. [Hold SPACE] Nue Carry Flight: Nue hovers overhead gripping Megumi and carries him for 2.0s
+    if (st.mode === 'NUE_CARRY') {
+      u.pullActiveTimer = 0.15;
+      const toCenter = new THREE.Vector3(-u.group.position.x, 0, 26 - u.group.position.z);
+      if (toCenter.lengthSq() > 64) {
+        toCenter.normalize();
+        st.dir.lerp(toCenter, dt * 1.4).normalize();
+      }
+      const carrySpeed = 20.5;
+      const res = this.mapBuilder.resolveHorizontalCollision(
+        u.group.position.x + st.dir.x * carrySpeed * 0.65 * dt,
+        u.group.position.z + st.dir.z * carrySpeed * 0.65 * dt,
+        u.radius,
+        u.group.position.y
+      );
+      u.group.position.x = res.x;
+      u.group.position.z = res.z;
+      u.group.position.y = Math.max(4.5, u.group.position.y + Math.sin(elapsed * 3.5) * 1.2 * dt);
+      this.clampUnitToDomainBarrier(u);
+      this.rotateUnitToward(u, st.dir.x, st.dir.z, dt);
+      u.animateRig?.(elapsed, false, false, 'idle');
+
+      if (st.timer <= 0) {
+        u.pullActiveTimer = 0;
+        u.verticalVel = -2.0;
+        this.npcMegumiShowcase = null;
+      }
+      return true;
+    }
+
+    // 3. [SHIFT] Shadow Step: sink into floor shadows for 2.4s (+45% speed), then emerge
+    if (st.mode === 'SHADOW_STEP') {
+      const floorY = this.mapBuilder.getFloorHeight(u.group.position.x, u.group.position.z, u.group.position.y);
+      u.group.position.y = floorY;
+      u.group.scale.set(1.05, 0.14, 1.05);
+      const glideSpeed = u.moveSpeed * 1.45 * this.getDomainSlowMultiplier(u);
+      const res = this.mapBuilder.resolveHorizontalCollision(
+        u.group.position.x + st.dir.x * glideSpeed * dt,
+        u.group.position.z + st.dir.z * glideSpeed * dt,
+        u.radius,
+        floorY
+      );
+      u.group.position.x = res.x;
+      u.group.position.z = res.z;
+      this.clampUnitToDomainBarrier(u);
+      this.rotateUnitToward(u, st.dir.x, st.dir.z, dt);
+      if (this.npcMegumiPuddleMesh) {
+        this.npcMegumiPuddleMesh.visible = true;
+        this.npcMegumiPuddleMesh.position.set(u.group.position.x, floorY + 0.08, u.group.position.z);
+        this.npcMegumiPuddleMesh.rotation.y += dt * 2.5;
+      }
+
+      if (st.timer <= 0) {
+        u.group.scale.set(1, 1, 1);
+        if (this.npcMegumiPuddleMesh) {
+          this.npcMegumiPuddleMesh.visible = false;
+        }
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.15, 0)), '#818cf8', 2.4);
+        this.spawnCursedBurst(u.group.position.clone().add(new THREE.Vector3(0, 0.6, 0)), 'SHADOW', 1.2, 28);
+        this.npcMegumiShowcase = null;
+      }
+      return true;
+    }
+
+    // 4. [Q] Chimera Shadow Garden -> [Q] Summon Mahoraga (ends Domain)
+    if (st.mode === 'DOMAIN_MAHORAGA') {
+      u.animateRig?.(elapsed, false, false, 'idle');
+      if (st.timer <= 0) {
+        this.npcMegumiShowcase = null;
+        const ownDomain = this.activeDomains.find((d) => d.casterId === u.id);
+        if (ownDomain) {
+          ownDomain.purpleTriggered = true;
+          this.endNpcDomain(u.id);
+        }
+
+        const hasLivingMahoraga = this.units.some(
+          (m) => m.alive && m instanceof MahoragaShikigami
+        );
+        if (!hasLivingMahoraga) {
+          const rawSpawn = u.group.position.clone().addScaledVector(st.dir, 4.2);
+          const res = this.mapBuilder.resolveHorizontalCollision(rawSpawn.x, rawSpawn.z, 1.1, u.group.position.y);
+          const spawnPos = new THREE.Vector3(
+            res.x,
+            this.mapBuilder.getFloorHeight(res.x, res.z, u.group.position.y),
+            res.z
+          );
+          const mahoraga = new MahoragaShikigami({
+            spawnPos,
+            ownerTeam: u.team,
+            summonerId: u.id,
+            createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team),
+            createNameplate: (parent, y, text, col) => this.createHeroNameplate(parent, y, text, col)
+          });
+          this.scene.add(mahoraga.group);
+          this.units.push(mahoraga);
+          this.spawnImpactRing(spawnPos.clone().add(new THREE.Vector3(0, 0.2, 0)), '#facc15', 7.5);
+          this.spawnCursedBurst(spawnPos.clone().add(new THREE.Vector3(0, 1.6, 0)), 'SHADOW', 3.4, 95);
+        }
+      }
+      return true;
+    }
+
+    return false;
+  }
+
   private updateNpcGojoAi(u: MobaUnit, dt: number, elapsed: number) {
     const hero = u.heroDef;
     const ai = u.npcAi;
@@ -6179,6 +6286,9 @@ export class FpsMobaEngine {
       barrierMaxHp: 1200,
       isDestructable: true,
       isGojoDomain: u.heroDef?.id === 'gojo',
+      isJogoDomain: u.heroDef?.id === 'jogo',
+      isMegumiDomain: u.heroDef?.id === 'megumi',
+      isUroDomain: u.heroDef?.id === 'uro',
       scene: this.scene,
       initialUnits: this.units,
       playerPos: this.playerPos,
@@ -6457,74 +6567,175 @@ export class FpsMobaEngine {
       return;
     }
 
-    // ── 2. MEGUMI SHOWCASE: Broadsword Cleave, Shadow Step, Rabbit Escape Leap, Nue Swoop ──
+    // ── 2. MEGUMI SHOWCASE: Exact same ability kit as the playable Megumi character (heroes.ts) ──
+    //    0: [M1] Cursed-Tool Broadsword (MELEE_CLEAVE: 54 dmg, 5.5m range, 120° arc)
+    //    1: [Hold M2] Rabbit Escape [Hold Right Click] -> [Hold SPACE] Midair Nue Carry (2.0s flight)
+    //    2: [SHIFT] Shadow Step (2.4s floor shadow submersion at +45% speed)
+    //    3: [E] Nue / Toad (Gama) (Nue 5.5m lightning stun swoop, or Toad ally tongue rescue pull)
+    //    4: [Q] Domain Expansion: Chimera Shadow Garden (19m) -> [Q] Summon Mahoraga (ends Domain)
     if (hero.id === 'megumi') {
-      if (stepIndex === 0) {
-        u.npcAbilityTimer = 3.0;
-        const slashPos = u.group.position.clone().add(new THREE.Vector3(0, 1.3, 0)).addScaledVector(flatDir, 2.2);
-        this.spawnMeleeArcVfx(slashPos, 3.6, '#6366f1');
-        this.spawnCursedBurst(slashPos, 'SHADOW', 1.1, 22);
-      } else if (stepIndex === 1) {
-        u.npcAbilityTimer = 4.0;
-        const p = u.group.position.clone();
-        this.spawnImpactRing(p.clone().add(new THREE.Vector3(0, 0.14, 0)), '#4f46e5', 3.0);
-        this.spawnCursedBurst(p.clone().add(new THREE.Vector3(0, 0.5, 0)), 'SHADOW', 1.5, 36);
-        // Hop out of shadows 7m forward
-        const nextX = p.x + flatDir.x * 7.0;
-        const nextZ = p.z + flatDir.z * 7.0;
-        const res = this.mapBuilder.resolveHorizontalCollision(nextX, nextZ, u.radius, p.y);
-        u.group.position.x = res.x;
-        u.group.position.z = res.z;
-        this.clampUnitToDomainBarrier(u);
-        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.14, 0)), '#818cf8', 2.6);
-      } else if (stepIndex === 2) {
+      const megumiStep = u.npcAbilityIndex ?? 0;
+      u.npcAbilityIndex = (megumiStep + 1) % 5;
+
+      if (megumiStep === 0) {
+        // [M1] Cursed-Tool Broadsword (hero.weapon)
+        u.npcAbilityTimer = 2.4;
+        const wep = hero.weapon;
+        const slashPos = u.group.position
+          .clone()
+          .add(new THREE.Vector3(0, 1.35, 0))
+          .addScaledVector(flatDir, wep.range * 0.42);
+        this.spawnMeleeArcVfx(slashPos, wep.range * 0.6, hero.color);
+        this.physicsWorld?.applyRadialImpulse(
+          slashPos,
+          wep.range * 0.85,
+          16 + (wep.knockback ?? 5.5) * 2.2,
+          0.35,
+          28
+        );
+        if (this.aiAttackingEnabled) {
+          this.damageTargetsAroundNpc(u, slashPos, wep.range * 0.6, wep.damage, wep.name);
+        }
+      } else if (megumiStep === 1) {
+        // [Hold M2] Rabbit Escape [Hold Right Click] (hero.secondaryFire) -> [Hold SPACE] Nue Carry (2.0s)
         u.npcAbilityTimer = 4.6;
-        // Rabbit Escape swarm + high upward leap!
-        u.verticalVel = 22.0;
-        u.group.position.y += 0.35;
-        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 4.2);
-        this.spawnCursedBurst(u.group.position.clone().add(new THREE.Vector3(0, 0.7, 0)), 'SHADOW', 2.0, 42);
-        for (let r = 0; r < 6; r++) {
-          const ang = (r / 6) * Math.PI * 2;
-          const rx = u.group.position.x + Math.cos(ang) * 1.8;
-          const rz = u.group.position.z + Math.sin(ang) * 1.8;
-          const res = this.mapBuilder.resolveHorizontalCollision(rx, rz, 0.42, u.group.position.y);
-          const rabbit = new RabbitEscapeShikigami({
-            spawnPos: new THREE.Vector3(
-              res.x,
-              this.mapBuilder.getFloorHeight(res.x, res.z, u.group.position.y),
-              res.z
-            ),
+        u.pullActiveTimer = 0.2;
+        const inShadowGarden = this.activeDomains.some((d) => d.casterId === u.id && d.isMegumiDomain);
+        this.npcMegumiShowcase = {
+          mode: 'RABBIT_CLIMB',
+          timer: 1.45,
+          spawnAcc: 0,
+          dir: flatDir.clone()
+        };
+        this.spawnNpcMegumiRabbitBatch(u, inShadowGarden ? 6 : 4);
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.2, 0)), '#e2e8f0', 4.6);
+        this.spawnCursedBurst(u.group.position.clone().add(new THREE.Vector3(0, 0.7, 0)), 'SHADOW', 2.2, 45);
+      } else if (megumiStep === 2) {
+        // [SHIFT] Shadow Step (hero.abilities.SHIFT: 2.4s floor shadow submersion at +45% speed)
+        const shiftAb = hero.abilities.SHIFT;
+        const durationSec = shiftAb.durationMs / 1000;
+        u.npcAbilityTimer = durationSec + 1.2;
+        this.npcMegumiShowcase = {
+          mode: 'SHADOW_STEP',
+          timer: durationSec,
+          spawnAcc: 0,
+          dir: flatDir.clone()
+        };
+        if (!this.npcMegumiPuddleMesh) {
+          const geo = new THREE.CircleGeometry(1.35, 32);
+          geo.rotateX(-Math.PI / 2);
+          const mat = new THREE.MeshBasicMaterial({
+            color: 0x1e1b4b,
+            transparent: true,
+            opacity: 0.88,
+            side: THREE.DoubleSide
+          });
+          this.npcMegumiPuddleMesh = new THREE.Mesh(geo, mat);
+          this.scene.add(this.npcMegumiPuddleMesh);
+        }
+        this.npcMegumiPuddleMesh.visible = true;
+        this.npcMegumiPuddleMesh.position.set(
+          u.group.position.x,
+          u.group.position.y + 0.08,
+          u.group.position.z
+        );
+        this.spawnImpactRing(u.group.position.clone().add(new THREE.Vector3(0, 0.12, 0)), '#6366f1', 3.2);
+        this.spawnCursedBurst(u.group.position.clone().add(new THREE.Vector3(0, 0.5, 0)), 'SHADOW', 1.6, 44);
+      } else if (megumiStep === 3) {
+        // [E] Nue / Toad (Gama) (hero.abilities.E: exact same castNueOrToad rules as player)
+        const eAb = hero.abilities.E;
+        u.npcAbilityTimer = 3.8;
+        const ally = this.units.find(
+          (other) =>
+            other.alive &&
+            other !== u &&
+            other.team === u.team &&
+            other.type === 'HERO' &&
+            other.hp < other.maxHp &&
+            other.group.position.distanceTo(u.group.position) <= 24
+        );
+
+        if (ally) {
+          const safePos = u.group.position.clone().addScaledVector(flatDir, 2.2);
+          const resolvedSafe = this.mapBuilder.resolveHorizontalCollision(
+            safePos.x,
+            safePos.z,
+            ally.radius,
+            u.group.position.y
+          );
+          safePos.set(
+            resolvedSafe.x,
+            this.mapBuilder.getFloorHeight(resolvedSafe.x, resolvedSafe.z, u.group.position.y),
+            resolvedSafe.z
+          );
+          const toadPos = u.group.position.clone().addScaledVector(flatDir, 1.3);
+          toadPos.y = this.mapBuilder.getFloorHeight(toadPos.x, toadPos.z, u.group.position.y);
+
+          const toad = new ToadShikigami({
+            spawnPos: toadPos,
+            safePos,
+            ally,
             team: u.team,
             summonerId: u.id,
-            hopPhase: r * 1.1,
-            scatterAngle: ang,
             createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
           });
-          this.scene.add(rabbit.group);
-          this.units.push(rabbit);
+          this.scene.add(toad.group);
+          this.units.push(toad);
+
+          const tongueOrigin = toadPos.clone().add(new THREE.Vector3(0, 0.65, 0));
+          this.spawnBeamTracer(
+            tongueOrigin,
+            ally.group.position.clone().add(new THREE.Vector3(0, ally.height * 0.5, 0)),
+            '#f472b6',
+            0.38,
+            0.14
+          );
+          this.spawnImpactRing(ally.group.position.clone().add(new THREE.Vector3(0, 0.3, 0)), '#f472b6', 2.4);
+          ally.hp = Math.min(ally.maxHp, ally.hp + 35);
+        } else {
+          const tRaw = u.group.position.clone().addScaledVector(flatDir, 11.0);
+          const res = this.mapBuilder.resolveHorizontalCollision(tRaw.x, tRaw.z, 1.0, u.group.position.y);
+          const targetPt = new THREE.Vector3(
+            res.x,
+            this.mapBuilder.getFloorHeight(res.x, res.z, u.group.position.y),
+            res.z
+          );
+          const inShadowGarden = this.activeDomains.some((d) => d.casterId === u.id && d.isMegumiDomain);
+          const rightVec = new THREE.Vector3(flatDir.z, 0, -flatDir.x);
+          const offsets = inShadowGarden ? [-3.0, 3.0] : [0];
+
+          for (const lat of offsets) {
+            const startPos = u.group.position
+              .clone()
+              .add(new THREE.Vector3(0, 6.2, 0))
+              .addScaledVector(rightVec, lat * 0.8);
+            const tPos = targetPt.clone().addScaledVector(rightVec, lat);
+            tPos.y = this.mapBuilder.getFloorHeight(tPos.x, tPos.z, targetPt.y);
+
+            const nue = new NueShikigami({
+              startPos,
+              targetPos: tPos,
+              shockRadius: eAb.radius,
+              damage: this.aiAttackingEnabled ? eAb.damage : 0,
+              stunSec: eAb.durationMs / 1000,
+              team: u.team,
+              summonerId: u.id,
+              createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
+            });
+            this.scene.add(nue.group);
+            this.units.push(nue);
+          }
         }
       } else {
-        u.npcAbilityTimer = 4.8;
-        const tRaw = u.group.position.clone().addScaledVector(flatDir, 11.0);
-        const res = this.mapBuilder.resolveHorizontalCollision(tRaw.x, tRaw.z, 1.0, u.group.position.y);
-        const tPos = new THREE.Vector3(
-          res.x,
-          this.mapBuilder.getFloorHeight(res.x, res.z, u.group.position.y),
-          res.z
-        );
-        const nue = new NueShikigami({
-          startPos: u.group.position.clone().add(new THREE.Vector3(0, 6.2, 0)),
-          targetPos: tPos,
-          shockRadius: 5.0,
-          damage: this.aiAttackingEnabled ? 22 : 0,
-          stunSec: 1.0,
-          team: u.team,
-          summonerId: u.id,
-          createHpBar: (parent, y, w, team) => this.createFloatingHpBar(parent, y, w, team)
-        });
-        this.scene.add(nue.group);
-        this.units.push(nue);
+        // [Q] Domain Expansion: Chimera Shadow Garden (hero.abilities.Q) -> [Q] Summon Mahoraga (ends Domain)
+        u.npcAbilityTimer = 6.2;
+        this.activateNpcDomain(u);
+        this.npcMegumiShowcase = {
+          mode: 'DOMAIN_MAHORAGA',
+          timer: 2.8,
+          spawnAcc: 0,
+          dir: flatDir.clone()
+        };
       }
       return;
     }
@@ -7193,6 +7404,12 @@ export class FpsMobaEngine {
       this.shadowPuddleMesh.geometry.dispose();
       this.shadowPuddleMesh = null;
     }
+    if (this.npcMegumiPuddleMesh) {
+      this.scene.remove(this.npcMegumiPuddleMesh);
+      this.npcMegumiPuddleMesh.geometry.dispose();
+      this.npcMegumiPuddleMesh = null;
+    }
+    this.npcMegumiShowcase = null;
     while (this.activeRealityWipes.length > 0) {
       this.removeRealityWipeAt(0);
     }

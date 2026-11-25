@@ -568,6 +568,7 @@ export class ToadShikigami extends ShikigamiEntity {
 
 /**
  * Megumi's Nue (Winged Lightning Owl) Shikigami:
+ * Loaded from `/models/nue_fly.glb` with its `Fly` animation clip.
  * Swoops from above onto the targeted ground spot, discharges an electric shockwave
  * that stuns and damages all enemies in the area, then dissolves back into shadow.
  */
@@ -577,9 +578,11 @@ export class NueShikigami extends ShikigamiEntity {
   private readonly shockRadius: number;
   private readonly shockDamage: number;
   private readonly stunSec: number;
+  private readonly fallbackMeshGroup: THREE.Group;
   private readonly wingLeft: THREE.Mesh;
   private readonly wingRight: THREE.Mesh;
   private readonly diveDuration = 0.52;
+  private mixer: THREE.AnimationMixer | null = null;
   private t = 0;
   private detonated = false;
 
@@ -596,6 +599,7 @@ export class NueShikigami extends ShikigamiEntity {
     const group = new THREE.Group();
     group.position.copy(opts.startPos);
 
+    const fallbackMeshGroup = new THREE.Group();
     const bodyMat = new THREE.MeshStandardMaterial({
       color: 0x3b2314,
       emissive: 0x1e3a8a,
@@ -610,31 +614,39 @@ export class NueShikigami extends ShikigamiEntity {
     });
     const maskMat = new THREE.MeshBasicMaterial({ color: 0xf8fafc });
 
-    const torso = new THREE.Mesh(new THREE.SphereGeometry(0.45, 12, 12), bodyMat);
-    torso.scale.set(0.9, 0.75, 1.5);
-    const mask = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 10), maskMat);
-    mask.position.set(0, 0.08, 0.56);
-    mask.scale.set(0.95, 0.85, 0.65);
+    const fallbackTorso = new THREE.Mesh(new THREE.SphereGeometry(0.45, 12, 12), bodyMat);
+    fallbackTorso.scale.set(0.9, 0.75, 1.5);
+    const fallbackMask = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 10), maskMat);
+    fallbackMask.position.set(0, 0.08, 0.56);
+    fallbackMask.scale.set(0.95, 0.85, 0.65);
 
     const wingGeo = new THREE.BoxGeometry(1.7, 0.08, 0.95);
     const wingLeft = new THREE.Mesh(wingGeo, wingMat);
     wingLeft.position.set(-0.95, 0.1, 0);
     const wingRight = new THREE.Mesh(wingGeo, wingMat);
     wingRight.position.set(0.95, 0.1, 0);
+    fallbackMeshGroup.add(fallbackTorso, fallbackMask, wingLeft, wingRight);
+
+    // Low-poly invisible hitboxes so raycasting never hits 99k skinned vertices
+    const hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
+    const bodyMesh = new THREE.Mesh(new THREE.SphereGeometry(0.95, 10, 10), hitboxMat);
+    const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.48, 10, 10), hitboxMat);
+    headMesh.position.set(0, 0.55, 0.35);
+    headMesh.userData.isHead = true;
 
     const sparkAura = new THREE.Mesh(
-      new THREE.SphereGeometry(0.9, 14, 14),
+      new THREE.SphereGeometry(1.45, 14, 14),
       new THREE.MeshBasicMaterial({
         color: 0x38bdf8,
         wireframe: true,
         transparent: true,
-        opacity: 0.55,
+        opacity: 0.45,
         blending: THREE.AdditiveBlending
       })
     );
-    group.add(torso, mask, wingLeft, wingRight, sparkAura);
+    group.add(fallbackMeshGroup, bodyMesh, headMesh, sparkAura);
 
-    const hpBarFill = opts.createHpBar(group, 1.4, 1.0, opts.team);
+    const hpBarFill = opts.createHpBar(group, 1.85, 1.4, opts.team);
 
     super({
       id: `nue_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -644,12 +656,12 @@ export class NueShikigami extends ShikigamiEntity {
       summonerId: opts.summonerId,
       canBeDamagedByCaster: false,
       maxHp: 180,
-      radius: 1.0,
-      height: 1.2,
+      radius: 1.35,
+      height: 2.7,
       group,
-      bodyMesh: torso,
-      headMesh: mask,
-      hitMeshes: [torso, mask],
+      bodyMesh,
+      headMesh,
+      hitMeshes: [bodyMesh, headMesh],
       hpBarFill,
       attackRange: 0,
       attackDamage: opts.damage,
@@ -667,8 +679,48 @@ export class NueShikigami extends ShikigamiEntity {
     this.shockRadius = opts.shockRadius;
     this.shockDamage = opts.damage;
     this.stunSec = opts.stunSec;
+    this.fallbackMeshGroup = fallbackMeshGroup;
     this.wingLeft = wingLeft;
     this.wingRight = wingRight;
+    void this.loadNueGlb();
+  }
+
+  private async loadNueGlb(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    try {
+      const gltf = await loadCachedGlb('/models/nue_fly.glb');
+      const toonGrad = getAnimeToonGradient();
+      const animRoot = cloneSkeleton(gltf.scene) as THREE.Group;
+      // Native mesh height is 1.772m; scale to 2.70m stature
+      animRoot.scale.setScalar(2.7 / 1.772);
+      applyAnimeToonToScene(animRoot, toonGrad);
+      animRoot.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          const mat = (obj as THREE.Mesh).material as THREE.MeshToonMaterial | undefined;
+          if (mat && mat.isMeshToonMaterial) {
+            mat.color.setHex(0xd4d8e0);
+            mat.emissive.setHex(0x000000);
+            mat.emissiveIntensity = 0.0;
+          }
+        }
+      });
+
+      const mixer = new THREE.AnimationMixer(animRoot);
+      const flyClip =
+        gltf.animations.find((c) => c.name.toLowerCase().includes('fly')) ?? gltf.animations[0] ?? null;
+      if (flyClip) {
+        const act = mixer.clipAction(flyClip);
+        act.setLoop(THREE.LoopRepeat, Infinity);
+        act.timeScale = 1.65;
+        act.play();
+      }
+
+      this.fallbackMeshGroup.visible = false;
+      this.group.add(animRoot);
+      this.mixer = mixer;
+    } catch (err) {
+      console.warn('[NueShikigami] Failed to load /models/nue_fly.glb:', err);
+    }
   }
 
   private detonate(ctx: ShikigamiContext): void {
@@ -695,9 +747,13 @@ export class NueShikigami extends ShikigamiEntity {
   }
 
   public override tickShikigami(dt: number, elapsed: number, ctx: ShikigamiContext): boolean {
-    const flap = Math.sin(elapsed * 26) * 0.52;
-    this.wingLeft.rotation.z = 0.25 + flap;
-    this.wingRight.rotation.z = -0.25 - flap;
+    if (this.mixer) {
+      this.mixer.update(dt);
+    } else {
+      const flap = Math.sin(elapsed * 26) * 0.52;
+      this.wingLeft.rotation.z = 0.25 + flap;
+      this.wingRight.rotation.z = -0.25 - flap;
+    }
 
     if (!this.detonated) {
       this.t += dt / this.diveDuration;
@@ -733,12 +789,16 @@ export class NueShikigami extends ShikigamiEntity {
 
 /**
  * Megumi's Nue Carry Shikigami:
+ * Loaded from `/models/nue_fly.glb` with its `Fly` animation clip.
  * Summoned midair after Rabbit Escape when holding SPACE; hovers overhead gripping Megumi
- * and carries him freely in any 3D direction for up to 2.0 seconds.
+ * with its talons (`LeftHindFoot` / `RightHindFoot`) and carries him freely in any 3D direction.
  */
 export class NueCarryShikigami extends ShikigamiEntity {
+  private readonly fallbackMeshGroup: THREE.Group;
   private readonly wingLeft: THREE.Mesh;
   private readonly wingRight: THREE.Mesh;
+  private mixer: THREE.AnimationMixer | null = null;
+  private posRef?: () => THREE.Vector3;
   private yawRef: () => number;
 
   constructor(opts: {
@@ -746,11 +806,14 @@ export class NueCarryShikigami extends ShikigamiEntity {
     team: MobaTeam;
     summonerId: string;
     getYaw: () => number;
+    getCarrierPos?: () => THREE.Vector3;
+    lifetimeSec?: number;
     createHpBar: FloatingHpBarFactory;
   }) {
     const group = new THREE.Group();
     group.position.copy(opts.spawnPos);
 
+    const fallbackMeshGroup = new THREE.Group();
     const bodyMat = new THREE.MeshStandardMaterial({
       color: 0x3b2314,
       emissive: 0x1e3a8a,
@@ -765,20 +828,28 @@ export class NueCarryShikigami extends ShikigamiEntity {
     });
     const maskMat = new THREE.MeshBasicMaterial({ color: 0xf8fafc });
 
-    const torso = new THREE.Mesh(new THREE.SphereGeometry(0.42, 12, 12), bodyMat);
-    torso.scale.set(0.9, 0.72, 1.45);
-    const mask = new THREE.Mesh(new THREE.SphereGeometry(0.28, 12, 10), maskMat);
-    mask.position.set(0, 0.04, -0.52);
+    const fallbackTorso = new THREE.Mesh(new THREE.SphereGeometry(0.42, 12, 12), bodyMat);
+    fallbackTorso.scale.set(0.9, 0.72, 1.45);
+    const fallbackMask = new THREE.Mesh(new THREE.SphereGeometry(0.28, 12, 10), maskMat);
+    fallbackMask.position.set(0, 0.04, -0.52);
 
     const wingGeo = new THREE.BoxGeometry(1.9, 0.08, 0.95);
     const wingLeft = new THREE.Mesh(wingGeo, wingMat);
     wingLeft.position.set(-1.1, 0.08, -0.15);
     const wingRight = new THREE.Mesh(wingGeo, wingMat);
     wingRight.position.set(1.1, 0.08, -0.15);
+    fallbackMeshGroup.add(fallbackTorso, fallbackMask, wingLeft, wingRight);
 
-    group.add(torso, mask, wingLeft, wingRight);
+    // Low-poly invisible hitboxes so raycasting never hits 99k skinned vertices
+    const hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
+    const bodyMesh = new THREE.Mesh(new THREE.SphereGeometry(0.95, 10, 10), hitboxMat);
+    const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.48, 10, 10), hitboxMat);
+    headMesh.position.set(0, 0.55, -0.35);
+    headMesh.userData.isHead = true;
 
-    const hpBarFill = opts.createHpBar(group, 1.4, 0.9, opts.team);
+    group.add(fallbackMeshGroup, bodyMesh, headMesh);
+
+    const hpBarFill = opts.createHpBar(group, 1.85, 1.4, opts.team);
 
     super({
       id: `nue_carry_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -788,12 +859,12 @@ export class NueCarryShikigami extends ShikigamiEntity {
       summonerId: opts.summonerId,
       canBeDamagedByCaster: false,
       maxHp: 220,
-      radius: 1.0,
-      height: 1.0,
+      radius: 1.35,
+      height: 2.7,
       group,
-      bodyMesh: torso,
-      headMesh: mask,
-      hitMeshes: [torso, mask],
+      bodyMesh,
+      headMesh,
+      hitMeshes: [bodyMesh, headMesh],
       hpBarFill,
       attackRange: 0,
       attackDamage: 0,
@@ -802,23 +873,72 @@ export class NueCarryShikigami extends ShikigamiEntity {
       goldValue: 0,
       xpValue: 0,
       isDestructable: true,
-      lifetimeSec: 2.2,
+      lifetimeSec: opts.lifetimeSec ?? 2.2,
       beamColor: '#38bdf8',
       attackBurstVariant: 'BLUE'
     });
 
+    this.fallbackMeshGroup = fallbackMeshGroup;
     this.wingLeft = wingLeft;
     this.wingRight = wingRight;
+    this.posRef = opts.getCarrierPos;
     this.yawRef = opts.getYaw;
+    void this.loadNueCarryGlb();
+  }
+
+  private async loadNueCarryGlb(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    try {
+      const gltf = await loadCachedGlb('/models/nue_fly.glb');
+      const toonGrad = getAnimeToonGradient();
+      const animRoot = cloneSkeleton(gltf.scene) as THREE.Group;
+      // Native mesh height is 1.772m; scale to 2.70m stature (~4.27m wingspan) and rotate 180° around Y
+      // so Nue's +Z head/wings align with Megumi's -Z camera forward direction when group.rotation.y = yawRef()
+      animRoot.scale.setScalar(2.7 / 1.772);
+      animRoot.rotation.y = Math.PI;
+      applyAnimeToonToScene(animRoot, toonGrad);
+      animRoot.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          const mat = (obj as THREE.Mesh).material as THREE.MeshToonMaterial | undefined;
+          if (mat && mat.isMeshToonMaterial) {
+            mat.color.setHex(0xd4d8e0);
+            mat.emissive.setHex(0x000000);
+            mat.emissiveIntensity = 0.0;
+          }
+        }
+      });
+
+      const mixer = new THREE.AnimationMixer(animRoot);
+      const flyClip =
+        gltf.animations.find((c) => c.name.toLowerCase().includes('fly')) ?? gltf.animations[0] ?? null;
+      if (flyClip) {
+        const act = mixer.clipAction(flyClip);
+        act.setLoop(THREE.LoopRepeat, Infinity);
+        act.timeScale = 1.35;
+        act.play();
+      }
+
+      this.fallbackMeshGroup.visible = false;
+      this.group.add(animRoot);
+      this.mixer = mixer;
+    } catch (err) {
+      console.warn('[NueCarryShikigami] Failed to load /models/nue_fly.glb:', err);
+    }
   }
 
   public override tickShikigami(dt: number, elapsed: number, ctx: ShikigamiContext): boolean {
-    const flap = Math.sin(elapsed * 20) * 0.42;
-    this.wingLeft.rotation.z = 0.22 + flap;
-    this.wingRight.rotation.z = -0.22 - flap;
+    if (this.mixer) {
+      this.mixer.update(dt);
+    } else {
+      const flap = Math.sin(elapsed * 20) * 0.42;
+      this.wingLeft.rotation.z = 0.22 + flap;
+      this.wingRight.rotation.z = -0.22 - flap;
+    }
 
-    // Hover cleanly overhead carrying Megumi so wings frame the top of his view & follow his facing
-    this.group.position.set(ctx.playerPos.x, ctx.playerPos.y + 2.45, ctx.playerPos.z);
+    // Hover cleanly overhead carrying Megumi so Nue's talons (y ≈ -1.16 local at 2.7m height) grip right at
+    // Megumi's shoulders/head (carrierPos.y + 1.59) and its 4.27m wings frame the top of his view
+    const carrierPos = this.posRef ? this.posRef() : ctx.playerPos;
+    this.group.position.set(carrierPos.x, carrierPos.y + 2.75, carrierPos.z);
     this.group.rotation.y = this.yawRef();
 
     return super.tickShikigami(dt, elapsed, ctx);
