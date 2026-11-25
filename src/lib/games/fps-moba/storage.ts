@@ -6,6 +6,7 @@ const SENSITIVITY_KEY = 'fps_moba_mouse_sensitivity';
 const MAP_STORAGE_KEY = 'fps_moba_selected_map_id';
 const HAND_DISTANCE_KEY = 'fps_moba_hand_distance_offset';
 const AI_ATTACKING_KEY = 'fps_moba_ai_attacking_enabled';
+const GOD_MODE_KEY = 'fps_moba_god_mode_enabled';
 
 export type MobaMapId = 'arena' | 'orlando';
 
@@ -89,5 +90,15 @@ export function getAiAttackingEnabled(): boolean {
 export function setAiAttackingEnabled(enabled: boolean): void {
   if (typeof window === 'undefined') return;
   localStorage.setItem(AI_ATTACKING_KEY, String(enabled));
+}
+
+export function getGodModeEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem(GOD_MODE_KEY) === 'true';
+}
+
+export function setGodModeEnabled(enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(GOD_MODE_KEY, String(enabled));
 }
 

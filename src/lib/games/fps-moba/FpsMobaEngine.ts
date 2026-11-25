@@ -26,13 +26,19 @@ import {
   createDrawnRealityWipe,
   createInfinityDistortionMaterial,
   createRealityWarpBeamEffect,
+  createShikigamiShadowCloud,
   createSkyVeilDistortionMaterial,
   createThinIceShatterEffect,
   createUnlimitedVoidDomainVfx,
   type DrawnRealityWipeController,
   type UnlimitedVoidDomainController
 } from './vfx/CursedShaderVfx';
-import { getAiAttackingEnabled, getHandDistanceOffset, getMouseSensitivity } from './storage';
+import {
+  getAiAttackingEnabled,
+  getGodModeEnabled,
+  getHandDistanceOffset,
+  getMouseSensitivity
+} from './storage';
 import { FPS_MOBA_HEROES } from './data/heroes';
 import {
   MobaEntity,
@@ -194,7 +200,8 @@ export class FpsMobaEngine {
   private teleportCamBlend = 0;
   private teleportMorph = 0;
   private activeDomains: DomainExpansion[] = [];
-  private isPlayerDestructable = true;
+  private godModeEnabled: boolean = getGodModeEnabled();
+  private isPlayerDestructable = !getGodModeEnabled();
   private aiAttackingEnabled: boolean = getAiAttackingEnabled();
 
   get activeDomain(): DomainExpansion | null {
@@ -925,6 +932,15 @@ export class FpsMobaEngine {
     this.aiAttackingEnabled = enabled;
   }
 
+  public setGodModeEnabled(enabled: boolean) {
+    this.godModeEnabled = enabled;
+    this.isPlayerDestructable = !enabled;
+    if (enabled) {
+      this.hp = this.maxHp;
+      this.playerRespawnTimer = 0;
+    }
+  }
+
   public requestPointerLock() {
     if (this.destroyed || this.winner) return;
     this.resumeAudioContext();
@@ -1529,6 +1545,7 @@ export class FpsMobaEngine {
       spawnImpactRing: (pos, colorHex, maxRadius) => this.spawnImpactRing(pos, colorHex, maxRadius),
       spawnCursedBurst: (pos, variant, radius, count) =>
         this.spawnCursedBurst(pos, variant, radius, count),
+      spawnShikigamiShadowCloud: (pos, radius) => this.spawnShikigamiShadowCloud(pos, radius),
       spawnPopup: (label, color, y = 32, amount = 0, isCrit = false) => {
         this.damagePopups.push({
           id: this.popupCounter++,
@@ -4033,6 +4050,14 @@ export class FpsMobaEngine {
         this.minionKills++;
         this.scene.remove(unit.group);
       } else {
+        if (unit instanceof ShikigamiEntity) {
+          const yOff = unit.shikigamiKind === 'NUE' ? 0 : unit.height * 0.45;
+          const cloudCenter = unit.group.position
+            .clone()
+            .add(new THREE.Vector3(0, yOff, 0));
+          const cloudRadius = Math.max(0.85, Math.max(unit.radius, unit.height * 0.65));
+          this.spawnShikigamiShadowCloud(cloudCenter, cloudRadius);
+        }
         this.scene.remove(unit.group);
       }
 
@@ -4141,6 +4166,20 @@ export class FpsMobaEngine {
       maxAge: variant === 'PURPLE' ? 1.15 : 0.85,
       onUpdate: (dt, progress) => {
         burst.update(dt, progress);
+      }
+    });
+  }
+
+  private spawnShikigamiShadowCloud(pos: THREE.Vector3, radius = 1.6) {
+    const cloud = createShikigamiShadowCloud(radius);
+    cloud.group.position.copy(pos);
+    this.scene.add(cloud.group);
+    this.vfxList.push({
+      mesh: cloud.group,
+      age: 0,
+      maxAge: 1.25,
+      onUpdate: (dt, progress) => {
+        cloud.update(dt, progress);
       }
     });
   }
@@ -5690,6 +5729,17 @@ export class FpsMobaEngine {
                 bestTargetUnit.respawnTimer = 8.0;
                 bestTargetUnit.group.visible = false;
               } else {
+                if (bestTargetUnit instanceof ShikigamiEntity) {
+                  const yOff = bestTargetUnit.shikigamiKind === 'NUE' ? 0 : bestTargetUnit.height * 0.45;
+                  const cloudCenter = bestTargetUnit.group.position
+                    .clone()
+                    .add(new THREE.Vector3(0, yOff, 0));
+                  const cloudRadius = Math.max(
+                    0.85,
+                    Math.max(bestTargetUnit.radius, bestTargetUnit.height * 0.65)
+                  );
+                  this.spawnShikigamiShadowCloud(cloudCenter, cloudRadius);
+                }
                 this.scene.remove(bestTargetUnit.group);
               }
               this.addKillFeed(u.name, u.team, bestTargetUnit.name, bestTargetUnit.team, 'Cursed Volley');
@@ -5822,7 +5872,7 @@ export class FpsMobaEngine {
       u.group.position.z = res.z;
       this.clampUnitToDomainBarrier(u);
       this.rotateUnitToward(u, st.dir.x, st.dir.z, dt);
-      u.animateRig?.(elapsed, true, false, 'run');
+      u.animateRig?.(elapsed, true, false, 'megumi_upward_slash');
 
       st.spawnAcc += dt;
       const spawnInterval = 0.14;
@@ -5925,7 +5975,7 @@ export class FpsMobaEngine {
 
     // 4. [Q] Chimera Shadow Garden -> [Q] Summon Mahoraga (ends Domain)
     if (st.mode === 'DOMAIN_MAHORAGA') {
-      u.animateRig?.(elapsed, false, false, 'idle');
+      u.animateRig?.(elapsed, false, false, 'megumi_thrust_slash');
       if (st.timer <= 0) {
         this.npcMegumiShowcase = null;
         const ownDomain = this.activeDomains.find((d) => d.casterId === u.id);
@@ -6578,8 +6628,16 @@ export class FpsMobaEngine {
       u.npcAbilityIndex = (megumiStep + 1) % 5;
 
       if (megumiStep === 0) {
-        // [M1] Cursed-Tool Broadsword (hero.weapon)
+        // [M1] Cursed-Tool Broadsword (hero.weapon) — cycles through Megumi's melee animations
         u.npcAbilityTimer = 2.4;
+        const meleeAnims: HeroAnimHint[] = [
+          'megumi_attack',
+          'megumi_charged_slash',
+          'megumi_thrust_slash',
+          'megumi_punch_combo'
+        ];
+        u.animOverrideHint = meleeAnims[Math.floor(elapsed) % meleeAnims.length];
+        u.animOverrideTimer = 1.65;
         const wep = hero.weapon;
         const slashPos = u.group.position
           .clone()
@@ -6645,6 +6703,8 @@ export class FpsMobaEngine {
         // [E] Nue / Toad (Gama) (hero.abilities.E: exact same castNueOrToad rules as player)
         const eAb = hero.abilities.E;
         u.npcAbilityTimer = 3.8;
+        u.animOverrideHint = 'megumi_upward_slash';
+        u.animOverrideTimer = 1.65;
         const ally = this.units.find(
           (other) =>
             other.alive &&
@@ -7017,7 +7077,7 @@ export class FpsMobaEngine {
   }
 
   private applyDamageToPlayer(dmg: number, attackerName: string, attackerTeam: MobaTeam) {
-    if (this.playerRespawnTimer > 0 || this.winner || !this.isPlayerDestructable) return;
+    if (this.playerRespawnTimer > 0 || this.winner || this.godModeEnabled || !this.isPlayerDestructable) return;
 
     // Gojo is invulnerable during the 800ms Limitless Teleport cast phase; Megumi is undetected during Shadow Step
     if (this.teleportPhase === 'CASTING' || this.shadowStepTimer > 0) {

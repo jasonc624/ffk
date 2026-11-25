@@ -2262,4 +2262,138 @@ export function createDrawnRealityWipe(
   return { group, rebuild, update, dispose };
 }
 
+let cachedShadowCloudTex: THREE.CanvasTexture | null = null;
+
+function getShikigamiCloudTexture(): THREE.CanvasTexture {
+  if (cachedShadowCloudTex) return cachedShadowCloudTex;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, size, size);
+    // Layered soft billowy lobes for a thick, organic Ten Shadows smoke puff
+    const lobes = [
+      { x: 64, y: 64, r: 54, a: 0.92 },
+      { x: 46, y: 54, r: 36, a: 0.72 },
+      { x: 82, y: 56, r: 34, a: 0.7 },
+      { x: 56, y: 80, r: 35, a: 0.68 },
+      { x: 76, y: 76, r: 30, a: 0.65 }
+    ];
+    for (const l of lobes) {
+      const grad = ctx.createRadialGradient(l.x, l.y, 2, l.x, l.y, l.r);
+      grad.addColorStop(0.0, `rgba(255, 255, 255, ${l.a})`);
+      grad.addColorStop(0.45, `rgba(235, 215, 255, ${l.a * 0.65})`);
+      grad.addColorStop(0.8, `rgba(180, 140, 230, ${l.a * 0.22})`);
+      grad.addColorStop(1.0, 'rgba(120, 80, 180, 0.0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(l.x, l.y, l.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.needsUpdate = true;
+  cachedShadowCloudTex = tex;
+  return tex;
+}
+
+/**
+ * Billowing dark purple Ten Shadows smoke cloud played when Nue or any of Megumi's
+ * Shikigamis are destroyed or expire, expanding and fading away into shadow mist.
+ */
+export function createShikigamiShadowCloud(radius = 1.6): {
+  group: THREE.Group;
+  update: (dt: number, progress: number) => void;
+} {
+  const group = new THREE.Group();
+  const cloudTex = getShikigamiCloudTexture();
+
+  const darkPalette = [0x12051f, 0x1e0936, 0x2b0d4e, 0x3b126b, 0x4c1d95];
+  const puffCount = Math.min(30, Math.max(14, Math.round(14 + radius * 7)));
+
+  interface CloudPuff {
+    sprite: THREE.Sprite;
+    mat: THREE.SpriteMaterial;
+    vel: THREE.Vector3;
+    baseScale: number;
+    targetScale: number;
+    baseOpacity: number;
+    rotSpeed: number;
+  }
+
+  const puffs: CloudPuff[] = [];
+
+  for (let i = 0; i < puffCount; i++) {
+    const isInnerWisp = i >= puffCount - 6;
+    const colorHex = isInnerWisp
+      ? 0x6d28d9
+      : darkPalette[Math.floor(Math.random() * darkPalette.length)];
+    const baseOpacity = isInnerWisp ? 0.42 + Math.random() * 0.16 : 0.78 + Math.random() * 0.18;
+
+    const mat = new THREE.SpriteMaterial({
+      map: cloudTex,
+      color: colorHex,
+      transparent: true,
+      opacity: baseOpacity,
+      depthWrite: false,
+      blending: THREE.NormalBlending
+    });
+    mat.rotation = Math.random() * Math.PI * 2;
+
+    const sprite = new THREE.Sprite(mat);
+    // Distribute puffs throughout the Shikigami's silhouette volume
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const rOff = Math.pow(Math.random(), 0.65) * radius * 0.72;
+    sprite.position.set(
+      Math.sin(phi) * Math.cos(theta) * rOff,
+      Math.cos(phi) * rOff * 0.75,
+      Math.sin(phi) * Math.sin(theta) * rOff
+    );
+
+    const baseScale = radius * (isInnerWisp ? 0.55 + Math.random() * 0.35 : 0.85 + Math.random() * 0.55);
+    const targetScale = baseScale * (1.75 + Math.random() * 0.75);
+    sprite.scale.set(baseScale, baseScale, 1);
+
+    const outDir = sprite.position.lengthSq() > 0.001
+      ? sprite.position.clone().normalize()
+      : new THREE.Vector3(Math.random() - 0.5, 0.5, Math.random() - 0.5).normalize();
+    const spreadSpeed = radius * (0.55 + Math.random() * 0.75);
+    const vel = outDir.multiplyScalar(spreadSpeed);
+    vel.y += 0.65 + Math.random() * 1.1; // Gentle upward smoke drift
+
+    group.add(sprite);
+    puffs.push({
+      sprite,
+      mat,
+      vel,
+      baseScale,
+      targetScale,
+      baseOpacity,
+      rotSpeed: (Math.random() - 0.5) * 1.4
+    });
+  }
+
+  const update = (dt: number, progress: number) => {
+    const easeOut = 1 - Math.pow(1 - progress, 2.2);
+    const fade = Math.pow(Math.max(0, 1 - progress), 1.45);
+    const drag = Math.pow(0.28, dt);
+
+    for (const p of puffs) {
+      p.sprite.position.addScaledVector(p.vel, dt);
+      p.vel.x *= drag;
+      p.vel.z *= drag;
+      p.vel.y = Math.max(0.35, p.vel.y * Math.pow(0.65, dt));
+      const s = THREE.MathUtils.lerp(p.baseScale, p.targetScale, easeOut);
+      p.sprite.scale.set(s, s, 1);
+      p.mat.rotation += p.rotSpeed * dt;
+      p.mat.opacity = p.baseOpacity * fade;
+    }
+  };
+
+  return { group, update };
+}
+
 

@@ -53,6 +53,7 @@ export interface ShikigamiContext {
     radius?: number,
     count?: number
   ) => void;
+  spawnShikigamiShadowCloud: (pos: THREE.Vector3, radius?: number) => void;
   spawnPopup: (label: string, color: string, y?: number, amount?: number, isCrit?: boolean) => void;
 }
 
@@ -191,15 +192,14 @@ export abstract class ShikigamiEntity extends MobaUnitEntity {
 
   /**
    * Called when the Shikigami's lifetime expires or it is forcibly dismissed.
+   * Dissolves every Megumi Shikigami into a billowing dark purple shadow cloud that fades away.
    */
   public onDespawn(ctx: ShikigamiContext): void {
     this.alive = false;
-    ctx.spawnCursedBurst(
-      this.group.position.clone().add(new THREE.Vector3(0, this.height * 0.45, 0)),
-      'SHADOW',
-      1.0,
-      20
-    );
+    const yOff = this.shikigamiKind === 'NUE' ? 0 : this.height * 0.45;
+    const cloudCenter = this.group.position.clone().add(new THREE.Vector3(0, yOff, 0));
+    const cloudRadius = Math.max(0.85, Math.max(this.radius, this.height * 0.65));
+    ctx.spawnShikigamiShadowCloud(cloudCenter, cloudRadius);
     ctx.scene.remove(this.group);
   }
 }

@@ -11,7 +11,13 @@ export type HeroAnimHint =
   | 'run'
   | 'reality_wipe'
   | 'thin_ice_breaker'
-  | 'domain_expansion';
+  | 'domain_expansion'
+  | 'megumi_attack'
+  | 'megumi_charged_slash'
+  | 'megumi_upward_slash'
+  | 'megumi_thrust_slash'
+  | 'megumi_punch_combo'
+  | 'megumi_dying';
 
 export interface ProceduralHeroBuildResult {
   group: THREE.Group;
@@ -65,6 +71,24 @@ interface DualClipAnimController {
   lastElapsed: number;
 }
 
+type MegumiAnimKey =
+  | 'idle'
+  | 'running'
+  | 'attack'
+  | 'charged_slash'
+  | 'upward_slash'
+  | 'thrust_slash'
+  | 'punch_combo'
+  | 'dying';
+
+interface MegumiAnimController {
+  root: THREE.Group;
+  mixer: THREE.AnimationMixer;
+  actions: Record<MegumiAnimKey, THREE.AnimationAction | null>;
+  activeKey: MegumiAnimKey;
+  lastElapsed: number;
+}
+
 interface RiggedGojoHandle {
   root: THREE.Group;
   hitMeshes: THREE.Mesh[];
@@ -74,6 +98,7 @@ interface RiggedGojoHandle {
   biomasterAnim?: BiomasterAnimController;
   dualClipAnim?: DualClipAnimController;
   uroAnim?: UroAnimController;
+  megumiAnim?: MegumiAnimController;
 }
 
 let cachedToonGradient: THREE.DataTexture | null = null;
@@ -1065,6 +1090,107 @@ async function loadRiggedUroGlb(unitUserData?: unknown): Promise<RiggedGojoHandl
     };
   } catch (err) {
     console.warn('Failed to load uro_takaka.glb:', err);
+    return null;
+  }
+}
+
+/** Loads `/models/megumi_complete.glb` and binds all 7 animations (running, Attack, Charged_Slash, Charged_Upward_Slash, Thrust_Slash, Punch_Combo_1, dying_backwards). */
+async function loadRiggedMegumiGlb(unitUserData?: unknown): Promise<RiggedGojoHandle | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const gltf = await loadCachedGlb('/models/megumi_complete.glb');
+    const toonGrad = getAnimeToonGradient();
+    const root = new THREE.Group();
+
+    const animRoot = cloneSkeleton(gltf.scene) as THREE.Group;
+    animRoot.scale.setScalar(2.22 / 1.7);
+    applyAnimeToonToScene(animRoot, toonGrad);
+    animRoot.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        const mat = (obj as THREE.Mesh).material as THREE.MeshToonMaterial | undefined;
+        if (mat && mat.isMeshToonMaterial) {
+          mat.emissive.setHex(0x000000);
+          mat.emissiveIntensity = 0.0;
+        }
+      }
+    });
+
+    const mixer = new THREE.AnimationMixer(animRoot);
+    const findExactOrSub = (name: string) =>
+      gltf.animations.find((c) => c.name.toLowerCase() === name.toLowerCase()) ??
+      gltf.animations.find((c) => c.name.toLowerCase().includes(name.toLowerCase())) ??
+      null;
+
+    const runningClip = findExactOrSub('running');
+    const attackClip = findExactOrSub('Attack');
+    const chargedSlashClip = findExactOrSub('Charged_Slash');
+    const upwardSlashClip = findExactOrSub('Charged_Upward_Slash');
+    const thrustSlashClip = findExactOrSub('Thrust_Slash');
+    const punchComboClip = findExactOrSub('Punch_Combo_1');
+    const dyingClip = findExactOrSub('dying_backwards');
+
+    const makeLoopAction = (clip: THREE.AnimationClip | null) => {
+      if (!clip) return null;
+      const act = mixer.clipAction(clip);
+      act.setLoop(THREE.LoopRepeat, Infinity);
+      return act;
+    };
+    const makeOnceAction = (clip: THREE.AnimationClip | null) => {
+      if (!clip) return null;
+      const act = mixer.clipAction(clip);
+      act.setLoop(THREE.LoopOnce, 1);
+      act.clampWhenFinished = true;
+      return act;
+    };
+
+    const actions: Record<MegumiAnimKey, THREE.AnimationAction | null> = {
+      // Combat-ready idle stance derived from the opening pose of Attack (avoids T-pose)
+      idle: makeLoopAction(attackClip ?? punchComboClip ?? runningClip),
+      running: makeLoopAction(runningClip),
+      attack: makeOnceAction(attackClip),
+      charged_slash: makeOnceAction(chargedSlashClip),
+      upward_slash: makeOnceAction(upwardSlashClip),
+      thrust_slash: makeOnceAction(thrustSlashClip),
+      punch_combo: makeOnceAction(punchComboClip),
+      dying: makeOnceAction(dyingClip)
+    };
+
+    if (actions.idle) {
+      actions.idle.enabled = true;
+      actions.idle.time = 0.04;
+      actions.idle.setEffectiveTimeScale(0);
+      actions.idle.play();
+    }
+
+    // Low-poly invisible hit capsules so raycasting never touches 168k skinned triangles
+    const hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
+    const bodyHit = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.38, 1.55, 8), hitboxMat);
+    bodyHit.position.y = 0.9;
+    const headHit = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 8), hitboxMat);
+    headHit.position.y = 1.96;
+    headHit.userData.isHead = true;
+    if (unitUserData !== undefined) {
+      bodyHit.userData.unit = unitUserData;
+      headHit.userData.unit = unitUserData;
+    }
+
+    root.add(animRoot, bodyHit, headHit);
+
+    return {
+      root,
+      hitMeshes: [bodyHit, headHit],
+      bones: new Map(),
+      mixer: null,
+      megumiAnim: {
+        root: animRoot,
+        mixer,
+        actions,
+        activeKey: 'idle',
+        lastElapsed: -1
+      }
+    };
+  } catch (err) {
+    console.warn('Failed to load megumi_complete.glb:', err);
     return null;
   }
 }
@@ -2231,7 +2357,22 @@ export function buildProceduralHeroModel(
     collar.position.set(0, 0.48, -0.02);
     upperBodyGroup.add(collar);
   } else if (hero.id === 'megumi') {
-    // Megumi's spiky dark navy-black hair crown + glowing indigo shadow-blade
+    // Load rigged /models/megumi_complete.glb with all 7 animations
+    void loadRiggedMegumiGlb().then((rig) => {
+      if (!rig) return;
+      if (bodyMesh.userData.unit) {
+        for (const m of rig.hitMeshes) {
+          m.userData.unit = bodyMesh.userData.unit;
+        }
+      }
+
+      hipsGroup.visible = false;
+      hitMeshes.splice(0, hitMeshes.length, ...rig.hitMeshes);
+      group.add(rig.root);
+      riggedGojo = rig;
+    });
+
+    // Immediate stylized fallback until async GLB finishes loading
     const megumiHairMat = createToonMaterial(0x0b0f1c, 0x312e81, 0.12);
     for (let i = 0; i < 10; i++) {
       const ang = (i / 10) * Math.PI * 2;
@@ -2460,6 +2601,69 @@ export function buildProceduralHeroModel(
       if (!isStunned) {
         uAnim.mixer.update(dt);
       }
+      return;
+    }
+
+    if (riggedGojo?.megumiAnim) {
+      const mAnim = riggedGojo.megumiAnim;
+      const dt = mAnim.lastElapsed < 0 ? 0.016 : Math.max(0, Math.min(0.1, elapsed - mAnim.lastElapsed));
+      mAnim.lastElapsed = elapsed;
+
+      let desiredKey: MegumiAnimKey = 'idle';
+      if (isStunned || animHint === 'megumi_dying') {
+        desiredKey = mAnim.actions.dying ? 'dying' : 'idle';
+      } else if (animHint === 'megumi_attack' && mAnim.actions.attack) {
+        desiredKey = 'attack';
+      } else if (animHint === 'megumi_charged_slash' && mAnim.actions.charged_slash) {
+        desiredKey = 'charged_slash';
+      } else if (animHint === 'megumi_upward_slash' && mAnim.actions.upward_slash) {
+        desiredKey = 'upward_slash';
+      } else if (animHint === 'megumi_thrust_slash' && mAnim.actions.thrust_slash) {
+        desiredKey = 'thrust_slash';
+      } else if (animHint === 'megumi_punch_combo' && mAnim.actions.punch_combo) {
+        desiredKey = 'punch_combo';
+      } else if (
+        (animHint === 'run' || animHint === 'walk' || (!animHint && isMoving)) &&
+        mAnim.actions.running
+      ) {
+        desiredKey = 'running';
+      }
+
+      if (desiredKey !== mAnim.activeKey) {
+        const prevAction = mAnim.actions[mAnim.activeKey];
+        const nextAction = mAnim.actions[desiredKey];
+        if (nextAction) {
+          nextAction.enabled = true;
+          nextAction.reset();
+          nextAction.setEffectiveWeight(1.0);
+          if (desiredKey === 'idle') {
+            nextAction.time = 0.04;
+            nextAction.setEffectiveTimeScale(0);
+          } else if (desiredKey === 'running') {
+            nextAction.setEffectiveTimeScale(animHint === 'walk' ? 0.72 : 1.08);
+          } else if (desiredKey === 'dying') {
+            nextAction.setEffectiveTimeScale(1.0);
+          } else {
+            nextAction.setEffectiveTimeScale(1.25);
+          }
+          nextAction.play();
+          if (prevAction && prevAction !== nextAction) {
+            prevAction.enabled = true;
+            nextAction.crossFadeFrom(prevAction, 0.16, false);
+          }
+        }
+        mAnim.activeKey = desiredKey;
+      }
+
+      if (desiredKey === 'running' && mAnim.actions.running) {
+        mAnim.actions.running.setEffectiveTimeScale(animHint === 'walk' ? 0.72 : 1.08);
+      } else if (desiredKey === 'idle' && mAnim.actions.idle) {
+        // Gentle breathing combat stance while standing still
+        mAnim.actions.idle.time = 0.04 + Math.sin(t * 2.2) * 0.015;
+        mAnim.actions.idle.setEffectiveTimeScale(0);
+      }
+
+      mAnim.mixer.update(dt);
       return;
     }
 

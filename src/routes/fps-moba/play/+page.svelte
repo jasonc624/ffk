@@ -15,7 +15,9 @@
     getHandDistanceOffset,
     setHandDistanceOffset,
     getAiAttackingEnabled,
-    setAiAttackingEnabled
+    setAiAttackingEnabled,
+    getGodModeEnabled,
+    setGodModeEnabled
   } from '$lib/games/fps-moba/storage';
   import {
     type FpsHeroDef,
@@ -30,6 +32,7 @@
   let sensitivity = $state<number>(1.0);
   let handDistance = $state<number>(0);
   let aiAttacking = $state<boolean>(true);
+  let godMode = $state<boolean>(false);
   let activeHero = $state<FpsHeroDef>(FPS_MOBA_HEROES[0]);
   let activeMapId = $state<MobaMapId>('orlando');
 
@@ -82,10 +85,17 @@
     engine?.setAiAttackingEnabled(aiAttacking);
   }
 
+  function toggleGodMode() {
+    godMode = !godMode;
+    setGodModeEnabled(godMode);
+    engine?.setGodModeEnabled(godMode);
+  }
+
   onMount(() => {
     sensitivity = getMouseSensitivity();
     handDistance = getHandDistanceOffset();
     aiAttacking = getAiAttackingEnabled();
+    godMode = getGodModeEnabled();
     startMatch();
     return () => {
       engine?.destroy();
@@ -473,7 +483,14 @@
     <!-- Left: HP, Shield & Mana Bars -->
     <div class="w-72 bg-slate-950/85 border border-white/15 p-4 rounded-2xl backdrop-blur-md">
       <div class="flex items-center justify-between font-['Share_Tech_Mono'] text-xs mb-1.5">
-        <span class="font-bold text-white">{hud.hero.name.toUpperCase()}</span>
+        <div class="flex items-center gap-2">
+          <span class="font-bold text-white">{hud.hero.name.toUpperCase()}</span>
+          {#if godMode}
+            <span class="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-400/60 text-[9px] font-bold text-amber-300">
+              GOD MODE
+            </span>
+          {/if}
+        </div>
         <span class="text-emerald-400">
           {hud.hp} / {hud.maxHp} HP {hud.shield > 0 ? `(+${hud.shield} SHD)` : ''}
         </span>
@@ -690,6 +707,18 @@
                 : 'bg-rose-500/20 border-rose-400/70 text-rose-300'}"
             >
               {aiAttacking ? 'ON' : 'OFF (PASSIVE)'}
+            </button>
+          </div>
+
+          <div class="flex items-center justify-between pt-0.5 border-t border-white/10">
+            <span class="text-slate-300">GOD MODE</span>
+            <button
+              onclick={toggleGodMode}
+              class="px-3 py-1 rounded-lg border text-[11px] font-bold transition-all cursor-pointer {godMode
+                ? 'bg-amber-500/25 border-amber-400 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.3)]'
+                : 'bg-white/5 border-white/15 text-slate-400 hover:text-white'}"
+            >
+              {godMode ? 'ON (INVINCIBLE)' : 'OFF'}
             </button>
           </div>
         </div>
